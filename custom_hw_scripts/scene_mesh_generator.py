@@ -35,6 +35,10 @@ from pathlib import Path
 
 # Adiciona o diretório atual ao PYTHONPATH para encontrar o pacote hy3dgen
 current_dir = os.path.dirname(os.path.abspath(__file__))
+inner_dir = os.path.join(current_dir, 'Hunyuan3D-2-main')
+if os.path.exists(inner_dir) and inner_dir not in sys.path:
+    # Se houver a pasta extraída do .zip do github, adicione ela!
+    sys.path.insert(0, inner_dir)
 if current_dir not in sys.path:
     sys.path.insert(0, current_dir)
 
@@ -113,9 +117,33 @@ class SceneMeshGenerator:
         start = time.time()
 
         try:
-            from hy3dgen.shapegen import Hunyuan3DDiTFlowMatchingPipeline
+            from hy3dgen.shapegen.pipelines import Hunyuan3DDiTFlowMatchingPipeline
+            import os
+            import torch
+            
+            subfolder = "hunyuan3d-dit-v2-1"
+            shape_subfolder = None
+            for root, dirs, files in os.walk(self.model_path):
+                for d in dirs:
+                    if "hunyuan3d-dit" in d:
+                        shape_subfolder = os.path.relpath(os.path.join(root, d), self.model_path)
+                        # Se achar exatamente o v2-0 base, prioridade máxima
+                        if d == "hunyuan3d-dit-v2-0":
+                            break
+                if shape_subfolder:
+                    break
+                    
+            if shape_subfolder:
+                subfolder = shape_subfolder
+            else:
+                logger.error(f"❌ NENHUM PESO 'hunyuan3d-dit' ENCONTRADO EM {self.model_path}")
+                import sys
+                sys.exit(1)
+                
+            logger.info(f"📂 Usando shape subfolder: {subfolder}")
             self._pipeline_shape = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(
-                self.model_path
+                self.model_path,
+                subfolder=subfolder
             )
             logger.info(f"  ✅ Shape pipeline carregado ({time.time() - start:.1f}s)")
         except Exception as e:
@@ -124,9 +152,34 @@ class SceneMeshGenerator:
 
         if self.enable_texture:
             try:
-                from hy3dgen.texgen import Hunyuan3DPaintPipeline
+                try:
+                    from hy3dgen.texgen import Hunyuan3DPaintPipeline
+                except ImportError:
+                    from hy3dpaint import Hunyuan3DPaintPipeline
+                    
+                tex_subfolder = "hunyuan3d-paint-v2-0-turbo"
+                tex_found = None
+                for root, dirs, files in os.walk(self.model_path):
+                    for d in dirs:
+                        if "hunyuan3d-paint" in d:
+                            tex_found = os.path.relpath(os.path.join(root, d), self.model_path)
+                            # prefer turbo if multiple exist
+                            if "turbo" in d:
+                                break
+                    if tex_found and "turbo" in tex_found:
+                        break
+                        
+                if tex_found:
+                    tex_subfolder = tex_found
+                else:
+                    logger.error(f"❌ NENHUM PESO 'hunyuan3d-paint' ENCONTRADO EM {self.model_path}")
+                    import sys
+                    sys.exit(1)
+
+                logger.info(f"📂 Usando tex subfolder: {tex_subfolder}")
                 self._pipeline_tex = Hunyuan3DPaintPipeline.from_pretrained(
-                    self.model_path
+                    self.model_path,
+                    subfolder=tex_subfolder
                 )
                 logger.info(f"  ✅ Texture pipeline carregado ({time.time() - start:.1f}s)")
             except Exception as e:
@@ -265,7 +318,10 @@ class SceneMeshGenerator:
 
         # ── Pós-processamento ────────────────────────────────────
         try:
-            from hy3dgen.shapegen import FloaterRemover, DegenerateFaceRemover, FaceReducer
+            try:
+                from hy3dgen.postprocessors import FloaterRemover, DegenerateFaceRemover, FaceReducer
+            except ImportError:
+                from hy3dgen.shapegen import FloaterRemover, DegenerateFaceRemover, FaceReducer
 
             mesh = FloaterRemover()(mesh)
             mesh = DegenerateFaceRemover()(mesh)
@@ -407,6 +463,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--low_vram", action="store_true", default=False,
         help="Modo de baixa VRAM (libera memória agressivamente)",
+    )
+    parser.add_argument(
+        "--normal_map", type=str, default=None,
+        help="Path do normal map HD (gerado pelo StableNormal-turbo)",
     )
     args = parser.parse_args()
 

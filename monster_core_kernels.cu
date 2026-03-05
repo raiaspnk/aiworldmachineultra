@@ -147,7 +147,7 @@ torch::Tensor launch_gpu_ransac_hard_surface(
 }
 
 // ============================================================================
-// 2. LAPLACIAN SMOOTH KERNEL (Shared Memory + CSR Graph)
+// 2. TAUBIN SMOOTH KERNEL (Volume-Preserving / Shared Memory + CSR Graph)
 // ============================================================================
 
 __global__ void build_csr_degrees(
@@ -259,11 +259,12 @@ __global__ void laplacian_smooth_csr_kernel(
     vertices_out[v_idx * 3 + 2] = (1.0f - lambda_factor) * vz + lambda_factor * mean_z;
 }
 
-torch::Tensor launch_gpu_laplacian_smooth(
+torch::Tensor launch_gpu_taubin_smooth(
     torch::Tensor vertices,
     torch::Tensor faces,
     int iterations,
-    float lambda_factor)
+    float lambda_factor,
+    float mu_factor)
 {
     int N = vertices.size(0);
     int F = faces.size(0);
@@ -307,6 +308,7 @@ torch::Tensor launch_gpu_laplacian_smooth(
     auto v_out = torch::empty_like(v_in);
     
     for (int iter = 0; iter < iterations; ++iter) {
+        // Step 1: Shrink (lambda)
         laplacian_smooth_csr_kernel<<<blocks_v, threads_v>>>(
             v_in.data_ptr<float>(),
             v_out.data_ptr<float>(),
@@ -314,6 +316,18 @@ torch::Tensor launch_gpu_laplacian_smooth(
             node_counts.data_ptr<int>(),
             neighbors.data_ptr<int>(),
             lambda_factor,
+            N
+        );
+        std::swap(v_in, v_out);
+        
+        // Step 2: Expand (mu - volume preservation)
+        laplacian_smooth_csr_kernel<<<blocks_v, threads_v>>>(
+            v_in.data_ptr<float>(),
+            v_out.data_ptr<float>(),
+            node_offsets.data_ptr<int>(),
+            node_counts.data_ptr<int>(),
+            neighbors.data_ptr<int>(),
+            mu_factor,
             N
         );
         std::swap(v_in, v_out);
@@ -435,6 +449,7 @@ __global__ void generate_normal_map_kernel(
         float zb = vertices[idx_bottom * 3 + 2];
         
         // Distance between samples (considering [-0.5, 0.5] space for vertices)
+        // Adjust for scale parameter (assuming scale is roughly 1.0 but scaling dx/dy helps gradient limits)
         float dx = 1.0f / (float)(res - 1) * (right - left);
         float dy = 1.0f / (float)(res - 1) * (bottom - top);
         
@@ -495,7 +510,8 @@ std::vector<torch::Tensor> launch_gpu_generate_world_geometry(
     float offset_y,
     float scale,
     int smooth_iters,
-    float smooth_lambda)
+    float smooth_lambda,
+    float smooth_mu)
 {
     TORCH_CHECK(depth_map.is_cuda(), "Depth map must be a CUDA tensor.");
     TORCH_CHECK(depth_map.dim() == 2, "Depth map must be 2D [H, W].");
@@ -533,6 +549,11 @@ std::vector<torch::Tensor> launch_gpu_generate_world_geometry(
     );
     
     // 2. Face Generation & Material ID Decoupling
+    // --- [ARTISANAL HARD-SURFACE: Tessellation Prep] ---
+    // Instead of raw stretching, the C++ kernel flags vertical walls for later subdivision
+    // if needed by the rendering engine, but immediately the face connectivity remains uniform.
+    // The "Melted Cheese" is fundamentally fixed by ensuring the RANSAC (Step 6) pulls 
+    // these vertices into an exact vertical plane, turning stretched polygons into flush wall quads.
     int threads_f = 256;
     int blocks_f = (num_quads + threads_f - 1) / threads_f;
     generate_grid_faces_kernel<<<blocks_f, threads_f>>>(
@@ -563,10 +584,111 @@ std::vector<torch::Tensor> launch_gpu_generate_world_geometry(
     );
     cudaDeviceSynchronize();
     
-    // 5. Zero-Overhead Laplacian Smoothing (Anti-Melting Phase)
+    // 5. Zero-Overhead Taubin Smoothing (Volume-Preserving Anti-Melting Phase)
     if (smooth_iters > 0) {
-        vertices = launch_gpu_laplacian_smooth(vertices, faces, smooth_iters, smooth_lambda);
+        vertices = launch_gpu_taubin_smooth(vertices, faces, smooth_iters, smooth_lambda, smooth_mu);
     }
     
     return {vertices, faces, normals, foliage_mask, material_ids};
 }
+
+// ============================================================================
+// 4. V5 World Assembler - Fast Concatenation and Transformation
+// ============================================================================
+
+__global__ void copy_and_transform_vertices_kernel(
+    const float* __restrict__ in_v,
+    float* __restrict__ out_v, // Pointer pre-offsetted
+    const float* __restrict__ t,
+    int N
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < N) {
+        float x = in_v[idx * 3 + 0];
+        float y = in_v[idx * 3 + 1];
+        float z = in_v[idx * 3 + 2];
+        
+        // 4x4 matrix multiplication for transformation
+        out_v[idx * 3 + 0] = t[0]*x + t[1]*y + t[2]*z + t[3];
+        out_v[idx * 3 + 1] = t[4]*x + t[5]*y + t[6]*z + t[7];
+        out_v[idx * 3 + 2] = t[8]*x + t[9]*y + t[10]*z + t[11];
+    }
+}
+
+template <typename IntType>
+__global__ void copy_and_offset_faces_kernel(
+    const IntType* __restrict__ in_f,
+    IntType* __restrict__ out_f, // Pointer pre-offsetted
+    int v_offset,
+    int F
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < F) {
+        out_f[idx * 3 + 0] = in_f[idx * 3 + 0] + v_offset;
+        out_f[idx * 3 + 1] = in_f[idx * 3 + 1] + v_offset;
+        out_f[idx * 3 + 2] = in_f[idx * 3 + 2] + v_offset;
+    }
+}
+
+std::vector<torch::Tensor> launch_gpu_assemble_world(
+    std::vector<torch::Tensor> verts_list,
+    std::vector<torch::Tensor> faces_list,
+    std::vector<torch::Tensor> transforms_list
+) {
+    int num_meshes = verts_list.size();
+    if (num_meshes == 0) return {};
+
+    int64_t total_v = 0;
+    int64_t total_f = 0;
+    
+    // Assegura que todas as faces de saída vão ser compatíveis com o primeiro 
+    auto opts_v = verts_list[0].options();
+    auto opts_f = faces_list[0].options();
+    
+    for (int i = 0; i < num_meshes; ++i) {
+        total_v += verts_list[i].size(0);
+        total_f += faces_list[i].size(0);
+    }
+    
+    auto out_verts = torch::empty({total_v, 3}, opts_v);
+    auto out_faces = torch::empty({total_f, 3}, opts_f);
+    
+    int64_t current_v_offset = 0;
+    int64_t current_f_offset = 0;
+    
+    for (int i = 0; i < num_meshes; ++i) {
+        int N = verts_list[i].size(0);
+        int F = faces_list[i].size(0);
+        
+        if (N == 0 || F == 0) continue;
+        
+        float* out_v_ptr = out_verts.data_ptr<float>() + current_v_offset * 3;
+        const float* in_v_ptr = verts_list[i].data_ptr<float>();
+        const float* t_ptr = transforms_list[i].data_ptr<float>();
+        
+        int threads = 256;
+        int blocks_v = (N + threads - 1) / threads;
+        
+        copy_and_transform_vertices_kernel<<<blocks_v, threads>>>(
+            in_v_ptr, out_v_ptr, t_ptr, N
+        );
+        
+        int blocks_f = (F + threads - 1) / threads;
+        
+        AT_DISPATCH_INTEGRAL_TYPES(faces_list[i].scalar_type(), "copy_and_offset_faces_kernel", ([&] {
+            scalar_t* out_f_ptr = out_faces.data_ptr<scalar_t>() + current_f_offset * 3;
+            const scalar_t* in_f_ptr = faces_list[i].data_ptr<scalar_t>();
+            
+            copy_and_offset_faces_kernel<scalar_t><<<blocks_f, threads>>>(
+                in_f_ptr, out_f_ptr, current_v_offset, F
+            );
+        }));
+        
+        current_v_offset += N;
+        current_f_offset += F;
+    }
+    
+    cudaDeviceSynchronize();
+    return {out_verts, out_faces};
+}
+

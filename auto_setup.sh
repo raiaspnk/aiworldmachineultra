@@ -1,24 +1,62 @@
 #!/bin/bash
 # ==============================================================================
-# AI WORLD ENGINE v14 + MONSTERCORE V2 - AUTO INSTALLER (RunPod Edition)
-# Desenvolvido para RTX 4090 / L40S / A6000 (Ubuntu/Debian)
+# AI WORLD ENGINE V5 + MONSTERCORE V5 - AUTO INSTALLER (Multi-Cloud Universal)
+# Auto-detecta: Google Cloud, Lightning AI, RunPod, Lambda, Vast.ai
+# Testado em: Debian Trixie (Python 3.13), Ubuntu 22/24, RunPod Ubuntu
 # ==============================================================================
 
 set -e # Sai do script se qualquer comando falhar
 
+# ── DETECÇÃO AUTOMÁTICA DO AMBIENTE ──────────────────────────────────
+WORKSPACE_DIR="$(cd "$(dirname "$0")" && pwd)"
+PIP_FLAGS=""
+
+# ── PYTHON 3.11 (compatibilidade total com pacotes ML) ───────────────
+# Python 3.12+ quebra open3d, basicsr, xformers. Usamos 3.11 no venv.
+VENV_DIR="$HOME/venv311"
+if [ ! -d "$VENV_DIR" ]; then
+    echo "🐍 Configurando Python 3.11 (compatibilidade ML total)..."
+    # Instalar python3.11 se não existir
+    if ! python3.11 --version &>/dev/null; then
+        sudo apt-get install -y python3.11 python3.11-dev python3.11-venv python3.11-distutils 2>/dev/null || \
+        sudo apt-get install -y python3.11 python3.11-dev python3.11-venv
+    fi
+    python3.11 -m venv "$VENV_DIR"
+    echo "✅ venv311 criado em $VENV_DIR"
+fi
+
+# Ativar o venv311
+source "$VENV_DIR/bin/activate"
+echo "✅ Python ativo: $(python --version)"
+PIP_FLAGS=""  # Dentro do venv, não precisa --break-system-packages
+
+# Detectar Cloud Provider
+if [ -f /etc/google_cloud ]; then
+    CLOUD="Google Cloud"
+elif [ -d /teamspace ]; then
+    CLOUD="Lightning AI"
+elif [ -d /workspace ] && grep -q "runpod" /etc/hostname 2>/dev/null; then
+    CLOUD="RunPod"
+else
+    CLOUD="Genérico"
+fi
+
 echo "==================================================================="
-echo "🚀 Iniciando Auto-Setup da AI World Engine (MonsterCore V2)..."
+echo "🚀 AI World Engine V5 Auto-Setup"
+echo "   📍 Cloud: $CLOUD"
+echo "   📂 Workspace: $WORKSPACE_DIR"
+echo "   🐍 Python: $(python3 --version 2>&1)"
 echo "==================================================================="
 
-# 1. Atualizar SO e ferramentas básicas de compilação
+# ── 1. PACOTES DO SISTEMA ────────────────────────────────────────────
 echo "[1/6] 🛠️ Instalando pacotes de sistema e Ninja Build..."
 sudo apt-get update -y
-sudo apt-get install -y libgl1 libglib2.0-0 libgomp1 cmake build-essential ninja-build unzip git-lfs wget
+# libgl1 (substitui libgl1-mesa-glx no Trixie), libglib2.0-0 auto-resolve pra 0t64
+sudo apt-get install -y libgl1 libglib2.0-0 libgomp1 cmake build-essential ninja-build unzip git-lfs wget || true
 git lfs install
 
-# 2. Clonar os 12 Monstros (Diretórios de trabalho)
-echo "[2/6] 📥 Clonando os Modelos de IA (Hunyuan3D, Real-ESRGAN, etc)..."
-WORKSPACE_DIR="$(pwd)"
+# ── 2. CLONAR MOTORES DE IA ──────────────────────────────────────────
+echo "[2/6] 📥 Clonando os Motores de IA..."
 cd "$WORKSPACE_DIR"
 
 if [ ! -d "Real-ESRGAN" ]; then git clone https://github.com/xinntao/Real-ESRGAN.git; fi
@@ -31,85 +69,83 @@ if [ ! -d "HunyuanWorld-Mirror-main" ]; then
     git clone https://github.com/Tencent-Hunyuan/HunyuanWorld-Mirror.git
     mv HunyuanWorld-Mirror HunyuanWorld-Mirror-main
 fi
-
-# 2.5 Injetar scripts customizados (World-to-Mesh) no repositório original clonado
-if [ -d "custom_hw_scripts" ]; then
-    echo "[2.5/6] 🧩 Injetando scripts customizados (StyleManager, SceneGen) nos motores..."
-    # HunyuanWorld
-    cp custom_hw_scripts/infer.py HunyuanWorld-Mirror-main/infer.py
-    cp -r custom_hw_scripts/src/* HunyuanWorld-Mirror-main/src/
-    
-    # Hunyuan3D-2
-    cp custom_hw_scripts/scene_mesh_generator.py Hunyuan3D-2-main/scene_mesh_generator.py
-fi
-
 if [ ! -d "sd-scripts" ]; then git clone https://github.com/kohya-ss/sd-scripts.git; fi
 
-# 3. Instalar PyTorch forçando CUDA 12.4+ (Para os Kernels do MonsterCore)
-echo "[3/6] 🔥 Instalando PyTorch c/ CUDA 12.4 (Obrigatório para V2)..."
-python3 -m pip install --upgrade pip
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
-pip install xformers --index-url https://download.pytorch.org/whl/cu124
+# 2.5 Injetar scripts customizados nos motores clonados
+if [ -d "custom_hw_scripts" ]; then
+    echo "[2.5/6] 🧩 Injetando scripts customizados..."
+    cp custom_hw_scripts/infer.py HunyuanWorld-Mirror-main/infer.py 2>/dev/null || true
+    cp -r custom_hw_scripts/src/* HunyuanWorld-Mirror-main/src/ 2>/dev/null || true
+    cp custom_hw_scripts/scene_mesh_generator.py Hunyuan3D-2-main/scene_mesh_generator.py 2>/dev/null || true
+fi
 
-# Instalar dependências adicionais
-echo "[3.5/6] 📦 Instalando ecossistema de Visão e 3D Python..."
-pip install -r requirements.txt || echo "requirements.txt pulado ou não encontrado"
-pip install -r requirements-extra.txt || echo "requirements-extra.txt pulado ou não encontrado"
-pip install ninja pyvista trimesh open3d pymeshlab basicsr timm transformers scipy xatlas huggingface_hub fastapi uvicorn
+# ── 3. PYTHON + PYTORCH + CUDA ───────────────────────────────────────
+echo "[3/6] 🔥 Instalando PyTorch c/ CUDA 12.4..."
+pip install $PIP_FLAGS torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+pip install $PIP_FLAGS xformers --index-url https://download.pytorch.org/whl/cu124
 
-# 3.6 Instalar Hunyuan3D-2 como pacote Python (obrigatório para hy3dgen)
-echo "[3.6/6] 🏗️ Compilando e instalando pacote Hunyuan3D-2 (hy3dgen)..."
-cd Hunyuan3D-2-main
-python3 -m pip install --no-build-isolation -e .
+echo "[3.5/6] 📦 Instalando ecossistema Python..."
+pip install $PIP_FLAGS -r requirements.txt 2>/dev/null || echo "requirements.txt pulado"
+pip install $PIP_FLAGS -r requirements-extra.txt 2>/dev/null || echo "requirements-extra.txt pulado"
+pip install $PIP_FLAGS ninja pyvista trimesh open3d pymeshlab basicsr timm transformers scipy xatlas huggingface_hub fastapi uvicorn
 
-# Compilar explicitamente o custom_rasterizer da Textura (Garante que a pintura AAA funcione)
-echo "[3.7/6] 🎨 Compilando Custom Rasterizer (Obrigatório para texturas)..."
+# 3.6 Compilar Hunyuan3D-2 (hy3dgen)
+echo "[3.6/6] 🏗️ Compilando Hunyuan3D-2 (hy3dgen)..."
+cd "$WORKSPACE_DIR/Hunyuan3D-2-main"
+pip install $PIP_FLAGS --no-build-isolation -e .
+
+# 3.7 Custom Rasterizer
+echo "[3.7/6] 🎨 Compilando Custom Rasterizer..."
 cd hy3dgen/texgen/custom_rasterizer
-python3 setup.py install || echo "Aviso: custom_rasterizer falhou. As texturas 3D podem ficar brancas."
+python3 setup.py install $PIP_FLAGS 2>/dev/null || echo "⚠️ custom_rasterizer falhou (texturas podem ficar brancas)"
 
-cd ~/aiworldmachinev13
+# Voltar pro workspace (path dinâmico, não hardcoded)
+cd "$WORKSPACE_DIR"
 
-# 4. Compilar o MonsterCore V2 (C++/CUDA)
-echo "[4/6] ⚙️ Compilando MonsterCore V2 (A Magia C++/CUDA)..."
+# ── 4. COMPILAR MONSTERCORE V5 ───────────────────────────────────────
+echo "[4/6] ⚙️ Compilando MonsterCore V5 (C++/CUDA)..."
 if [ -f "setup.py" ] && [ -f "monster_core.cpp" ] && [ -f "monster_core_kernels.cu" ]; then
     chmod +x bridge.py setup.py
     python3 setup.py build_ext --inplace
-    echo "✅ MonsterCore V2 Compilado!"
+    echo "✅ MonsterCore V5 Compilado!"
 else
-    echo "⚠️ AVISO: Scripts do MonsterCore (setup.py, .cpp, .cu) não encontrados. Envie-os para cá!"
+    echo "⚠️ AVISO: Arquivos do MonsterCore não encontrados. Envie setup.py, .cpp e .cu!"
 fi
 
-# 5. Baixar Pesos via HuggingFace
-echo "[5/6] 🧠 Baixando Cérebro das IAs (Gigabytes de pesos)..."
+# ── 5. BAIXAR PESOS DAS IAs ─────────────────────────────────────────
+echo "[5/6] 🧠 Baixando pesos dos modelos (pode levar alguns minutos)..."
 mkdir -p "$WORKSPACE_DIR/weights" "$WORKSPACE_DIR/output" "$WORKSPACE_DIR/models" "$WORKSPACE_DIR/parts" "$WORKSPACE_DIR/sessions"
 
-# Real-ESRGAN
 if [ ! -f "$WORKSPACE_DIR/weights/RealESRGAN_x4plus.pth" ]; then
     wget https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth -P "$WORKSPACE_DIR/weights/"
 fi
 
-# Hunyuan3D e SAM 3
 python3 -c "
 import os
-from huggingface_hub import snapshot_download, hf_hub_download
-print('Iniciando HF Downloads...')
+from huggingface_hub import snapshot_download
+print('Baixando Hunyuan3D-2 do HuggingFace...')
 wk_dir = os.getcwd()
 snapshot_download('tencent/Hunyuan3D-2', local_dir=f'{wk_dir}/weights/Hunyuan3D-2', resume_download=True)
 "
 
-# 6. Finalização e Teste do Motor
-echo "[6/6] 🏁 Testando Ignição do MonsterCore..."
-if python3 -c "import torch; import monster_core; monster_core.init_pool(8192); print('\n✅ MONSTERCORE DETECTADO NA PLACA DE VÍDEO!');" 2>/dev/null; then
+# ── 6. TESTE DE IGNIÇÃO ─────────────────────────────────────────────
+echo "[6/6] 🏁 Testando ignição do MonsterCore..."
+GPU_NAME=$(python3 -c "import torch; print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'NENHUMA GPU')" 2>/dev/null || echo "ERRO")
+GPU_VRAM=$(python3 -c "import torch; print(f'{torch.cuda.get_device_properties(0).total_mem / 1e9:.0f}GB') if torch.cuda.is_available() else print('?')" 2>/dev/null || echo "?")
+
+if python3 -c "import torch; import monster_core; monster_core.init_pool(8192); print('\n✅ MONSTERCORE V5 ONLINE!');" 2>/dev/null; then
     echo "==================================================================="
-    echo "🏎️  AI WORLD ENGINE (V13) ESTÁ PRONTA!"
-    echo "   Sua bateria de RTX 4090 está armada."
+    echo "🏎️  AI WORLD ENGINE V5 ESTÁ PRONTA!"
+    echo "   📍 Cloud: $CLOUD"
+    echo "   🎮 GPU: $GPU_NAME ($GPU_VRAM VRAM)"
     echo ""
-    echo "   Para gerar o primeiro asset digite:"
-    echo "   python3 bridge.py --prompt 'castelo cyberpunk' --target-faces 150000 --smoothing-iterations 30"
+    echo "   Comando V5 básico:"
+    echo "   python3 bridge.py --prompt 'cyberpunk city' --world-mode --use-depth --use-sam"
     echo "==================================================================="
 else
     echo "==================================================================="
-    echo "⚠️ SETUP CONCLUIDO, MAS O MONSTERCORE NÃO IMPORTOU CORRETAMENTE!"
+    echo "⚠️ SETUP CONCLUIDO, MAS O MONSTERCORE NÃO IMPORTOU!"
+    echo "   GPU detectada: $GPU_NAME ($GPU_VRAM)"
     echo "   Verifique os logs de compilação acima."
     echo "==================================================================="
 fi

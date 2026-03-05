@@ -220,7 +220,8 @@ py::dict async_geometry_pipeline(
     float ransac_threshold,
     int ransac_iters,
     int smooth_iters,
-    float smooth_lambda
+    float smooth_lambda,
+    float smooth_mu
 ) {
     // Clonar tensores para ownership segura nas threads
     auto img_copy = master_img.clone();
@@ -243,6 +244,7 @@ py::dict async_geometry_pipeline(
         std::jthread t1([&tile_results, &tiling_ok, &result_mutex,
                          img_copy, tile_grid, overlap_px]() {
             try {
+                // Ensure local copies don't get GC'd prematurely
                 auto tiles = zero_copy_tiling(img_copy, tile_grid, overlap_px);
                 std::lock_guard<std::mutex> lock(result_mutex);
                 tile_results = std::move(tiles);
@@ -255,17 +257,19 @@ py::dict async_geometry_pipeline(
         // Thread 2: RANSAC + Laplacian Smooth
         std::jthread t2([&rectified_result, &smoothed_result, &geometry_ok, &result_mutex,
                          verts_copy, faces_copy, ransac_threshold, ransac_iters,
-                         smooth_iters, smooth_lambda]() {
+                         smooth_iters, smooth_lambda, smooth_mu]() {
             try {
                 auto rectified = launch_gpu_ransac_hard_surface(
                     verts_copy, ransac_threshold, ransac_iters, /*batch_size=*/100
                 );
-                auto smoothed = launch_gpu_laplacian_smooth(
-                    rectified, faces_copy, smooth_iters, smooth_lambda
+                auto smoothed = launch_gpu_taubin_smooth(
+                    rectified, faces_copy, smooth_iters, smooth_lambda, smooth_mu
                 );
                 
                 // Return explicitly via Pinned Memory for faster transfer back to CPU
-                smoothed = smoothed.to(torch::TensorOptions().device(torch::kCPU).pinned_memory(true));
+                // detach() ensures that if Python re-acquires it, auto-grad doesn't cry
+                smoothed = smoothed.detach().to(torch::TensorOptions().device(torch::kCPU).pinned_memory(true));
+                rectified = rectified.detach().cpu();
 
                 std::lock_guard<std::mutex> lock(result_mutex);
                 rectified_result = rectified;
@@ -305,8 +309,15 @@ py::dict async_geometry_pipeline(
 // ============================================================================
 
 std::vector<torch::Tensor> generate_world_geometry_pipeline(
-    torch::Tensor depth_map, float max_height, float offset_x, float offset_y, float scale, int smooth_iters, float smooth_lambda) {
-    return launch_gpu_generate_world_geometry(depth_map, max_height, offset_x, offset_y, scale, smooth_iters, smooth_lambda);
+    torch::Tensor depth_map, float max_height, float offset_x, float offset_y, float scale, int smooth_iters, float smooth_lambda, float smooth_mu) {
+    return launch_gpu_generate_world_geometry(depth_map, max_height, offset_x, offset_y, scale, smooth_iters, smooth_lambda, smooth_mu);
+}
+
+std::vector<torch::Tensor> assemble_world(
+    std::vector<torch::Tensor> verts_list,
+    std::vector<torch::Tensor> faces_list,
+    std::vector<torch::Tensor> transforms_list) {
+    return launch_gpu_assemble_world(verts_list, faces_list, transforms_list);
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
@@ -334,10 +345,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "Retificação de planos Hard-Surface via RANSAC paralelo na GPU (Kernel CUDA)",
           py::arg("vertices"), py::arg("distance_threshold") = 0.02f,
           py::arg("num_iterations") = 1000, py::arg("batch_size") = 100);
-    m.def("gpu_laplacian_smooth", &launch_gpu_laplacian_smooth,
-          "Suavização Laplaciana na GPU via Caching & CSR (Kernel CUDA)",
+    m.def("gpu_taubin_smooth", &launch_gpu_taubin_smooth,
+          "Suavização Taubin na GPU via Caching & CSR (Kernel CUDA, preserva volume)",
           py::arg("vertices"), py::arg("faces"),
-          py::arg("iterations") = 5, py::arg("lambda_factor") = 0.5f);
+          py::arg("iterations") = 5, py::arg("lambda_factor") = 0.5f, py::arg("mu_factor") = -0.53f);
 
     // Pipeline Assíncrono
     m.def("async_geometry_pipeline", &async_geometry_pipeline,
@@ -345,12 +356,17 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("master_img"), py::arg("vertices"), py::arg("faces"),
           py::arg("tile_grid") = 2, py::arg("overlap_px") = 64,
           py::arg("ransac_threshold") = 0.02f, py::arg("ransac_iters") = 1000,
-          py::arg("smooth_iters") = 5, py::arg("smooth_lambda") = 0.5f);
+          py::arg("smooth_iters") = 5, py::arg("smooth_lambda") = 0.5f, py::arg("smooth_mu") = -0.53f);
           
     // V3: Zero-Overhead Terrain Generation / Displacement mapping / Foliage / PBR Normals
     m.def("generate_world_geometry_pipeline", &generate_world_geometry_pipeline,
           "Zero-Overhead PTX Geometry Instancing for World Tiling. Returns [vertices, faces, normal_map, foliage_mask, material_ids]",
           py::arg("depth_map"), py::arg("max_height") = 0.5f,
           py::arg("offset_x") = 0.0f, py::arg("offset_y") = 0.0f, py::arg("scale") = 1.0f,
-          py::arg("smooth_iters") = 3, py::arg("smooth_lambda") = 0.5f);
+          py::arg("smooth_iters") = 3, py::arg("smooth_lambda") = 0.5f, py::arg("smooth_mu") = -0.53f);
+          
+    // V5: True 3D World Assembler
+    m.def("assemble_world", &assemble_world,
+          "Batec batch merging & transformation of multiple meshes into a single global VRAM structure",
+          py::arg("verts_list"), py::arg("faces_list"), py::arg("transforms_list"));
 }

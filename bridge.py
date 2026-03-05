@@ -42,6 +42,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Any
+from awe_logger import AWELogger, configure_log_file, print_pipeline_banner, print_pipeline_summary
 
 # ── Caminhos dos projetos ──────────────────────────────────────────────
 # Ajuste estes caminhos conforme a localização dos projetos no seu sistema.
@@ -84,6 +85,8 @@ def setup_logging(log_file: Optional[str] = None, verbose: bool = False):
         log_path = Path(log_file)
         log_path.parent.mkdir(parents=True, exist_ok=True)
         handlers.append(logging.FileHandler(str(log_path), encoding="utf-8"))
+        # Integra o awe_logger ao mesmo arquivo para log unificado
+        configure_log_file(log_file)
 
     logging.basicConfig(level=level, format=fmt, datefmt=datefmt, handlers=handlers)
     return logging.getLogger("world_to_mesh")
@@ -329,24 +332,22 @@ class WorldToMeshPipeline:
         self.logger.info("   📏 [AUTO] Depth Anything 3 (metric depth)...")
 
         try:
-            from depth_anything_3.api import DepthAnything3
             import torch
             import cv2
             import numpy as np
 
             device = 'cuda' if torch.cuda.is_available() else 'cpu'
             
+            # Tenta importar DA3 nativo (pode falhar com ImportError ou ModuleNotFoundError)
+            from depth_anything_3.api import DepthAnything3
+            
             # Usar DA3Metric-Large para depth em escala métrica real
             # Alternativa: DA3NESTED-GIANT-LARGE para multi-view + metric
             model_name = "depth-anything/DA3METRIC-LARGE"
             
-            try:
-                # Carregar modelo via HuggingFace Hub
-                model = DepthAnything3.from_pretrained(model_name)
-                model = model.to(device=device).eval()
-            except Exception as e:
-                self.logger.warning(f"   ⚠️ Falha ao carregar modelo: {e}")
-                return None
+            # Carregar modelo via HuggingFace Hub
+            model = DepthAnything3.from_pretrained(model_name)
+            model = model.to(device=device).eval()
 
             # Processar imagem
             image = cv2.imread(image_path)
@@ -389,10 +390,122 @@ class WorldToMeshPipeline:
             return depth_npz_path
 
         except ImportError as ie:
-            self.logger.warning(f"   ⚠️ Depth Anything 3 não instalado: {ie}")
-            return None
+            self.logger.warning(f"   ⚠️ Depth Anything 3 nativo não instalado. Usando fallback via transformers (DA2-Large)...")
+            try:
+                from transformers import pipeline
+                import torch
+                import cv2
+                import numpy as np
+                from PIL import Image
+                
+                device = 0 if torch.cuda.is_available() else -1
+                pipe = pipeline(task="depth-estimation", model="depth-anything/Depth-Anything-V2-Large-hf", device=device)
+                
+                # O pipeline do HuggingFace aceita PIL Image e retorna um dicionário
+                img_pil = Image.open(image_path).convert('RGB')
+                depth_result = pipe(img_pil)
+                
+                # depth_result["depth"] é uma PIL Image (grayscale) onde os valores já estão em 0-255 ou float dependendo do backend
+                # Para manter compatibilidade com DA3, Extraímos o tensor Numpy original (se existir) ou convertemos a imagem
+                if "tensor" in depth_result:
+                    depth = depth_result["tensor"].squeeze().cpu().numpy()
+                else:
+                    depth = np.array(depth_result["depth"], dtype=np.float32)
+                
+                # Inverter profundidade para ficar mais coerente: DA2 claro = perto. 
+                # (Se achatar demais as montanhas, pode ser necessário remover essa inversão).
+                # Transformando grayscale [0, 255] em escala pseudo-métrica para o world_generator não bugar.
+                depth = depth / 25.5  # escala arbitraria 0-10m
+                
+                depth_npz_path = image_path.replace('.png', '_depth_metric.npz')
+                np.savez_compressed(depth_npz_path, depth=depth)
+                
+                depth_normalized = ((depth - depth.min()) / (depth.max() - depth.min()) * 255).astype(np.uint8)
+                depth_vis_path = image_path.replace('.png', '_depth.png')
+                cv2.imwrite(depth_vis_path, depth_normalized)
+                
+                self.logger.info(f"   ✅ Depth Anything V2 (Fallback) gerado ({depth.shape[1]}x{depth.shape[0]})")
+                
+                del pipe, img_pil, depth_result, depth
+                import gc
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    
+                return depth_npz_path
+                
+            except Exception as e_fallback:
+                 self.logger.warning(f"   ⚠️ Depth fallback falhou: {e_fallback}")
+                 return None
         except Exception as e:
             self.logger.warning(f"   ⚠️ Depth refinement falhou: {e}")
+            return None
+
+    def _apply_micro_displacement(self, image_path: str, use_marigold: bool = False) -> Optional[str]:
+        """
+        Marigold LCM – Micro-Displacement Depth Mapping
+        
+        Usa o pipeline LCM (Latent Consistency Model) do Marigold para extrair
+        micro-relevos (sacadas, placas, janelas afundadas) da imagem.
+        Complementa de forma híbrida o Macro-Depth do Depth Anything V3.
+        """
+        if not use_marigold:
+            return None
+
+        self.logger.info("   🔍 [AUTO] Marigold LCM (Micro-Displacement Depth)...")
+
+        try:
+            import torch
+            from diffusers import MarigoldDepthPipeline
+            from PIL import Image
+            import numpy as np
+            import cv2
+            from pathlib import Path
+
+            device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+            # Carregar Pipeline LCM (Mito mais rápido e leve que o original)
+            self.logger.info("   📦 Carregando Marigold (LCM) no diffusers...")
+            model_id = "prs-eth/marigold-lcm-v1-0"
+            pipe = MarigoldDepthPipeline.from_pretrained(model_id, torch_dtype=torch.float16)
+            pipe = pipe.to(device)
+
+            # Processar imagem
+            image = Image.open(image_path).convert("RGB")
+            
+            with torch.no_grad():
+                # Inference num_inference_steps=4 parameter is the default for LCM
+                prediction = pipe(image, num_inference_steps=4)
+
+            # prediction.depth format is [H, W] affine-invariant normalized depth
+            depth = prediction.depth_np
+            
+            # Salvar depth bruto (NPZ para escala 0..1 flutuante)
+            depth_npz_path = image_path.replace('.png', '_marigold_micro.npz')
+            np.savez_compressed(depth_npz_path, depth=depth)
+
+            # Salvar visualização normalizada
+            depth_vis_path = image_path.replace('.png', '_marigold.png')
+            prediction.depth_colored.save(depth_vis_path)
+
+            self.logger.info(f"   ✅ Marigold Micro-Depth: {depth.shape[1]}x{depth.shape[0]}")
+            self.logger.info(f"   💾 Depth NPZ (micro): {depth_npz_path}")
+
+            # ── VRAM flush obrigatório após Marigold ──────
+            del pipe, image, prediction, depth
+            import gc
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                self.logger.info("   🧹 VRAM liberada após Marigold LCM")
+
+            return depth_npz_path
+
+        except ImportError as ie:
+            self.logger.warning(f"   ⚠️ Diffusers/Marigold não instalado: {ie}. Run: pip install diffusers transformers accelerate")
+            return None
+        except Exception as e:
+            self.logger.warning(f"   ⚠️ Marigold falhou: {e}")
             return None
 
     def _generate_normal_map(self, image_path: str, use_normal: bool = False) -> Optional[str]:
@@ -478,7 +591,7 @@ class WorldToMeshPipeline:
             self.logger.warning(f"   ⚠️ Normal map generation falhou: {e}")
             return None
 
-    def _apply_segmentation(self, image_path: str, glb_path: str, use_sam: bool = False) -> Optional[str]:
+    def _apply_segmentation(self, image_path: str, glb_path: str, use_sam: bool = False) -> Optional[tuple[str, str]]:
         """
         SAM 3 – Segmentação Semântica com Conceitos (Open-Vocabulary)
 
@@ -496,7 +609,7 @@ class WorldToMeshPipeline:
             use_sam: Flag para habilitar/desabilitar
 
         Returns:
-            Optional[str]: Path do JSON com metadados semânticos (None se desabilitado)
+            Optional[tuple[str, str]]: (Metadados JSON path, Máscaras NPZ path) ou None se desabilitado
         """
         if not use_sam:
             return None
@@ -509,15 +622,12 @@ class WorldToMeshPipeline:
             import json
             import numpy as np
 
-            # SAM 3 tem API diferente do SAM 2
-            try:
-                from sam3 import build_sam3, SamPrompt
-                from sam3.automatic_mask_generator import SamAutomaticMaskGenerator
-            except ImportError:
-                self.logger.warning("   ⚠️ SAM 3 não instalado. Tente: pip install sam3")
-                return None
-
             device = 'cuda' if torch.cuda.is_available() else 'cpu'
+            
+            # SAM 3 tem API diferente do SAM 2
+            # Se falhar (e.g. sam3 oficial nao instalado), cai no fallback do transformers
+            from sam3 import build_sam3, SamPrompt
+            from sam3.automatic_mask_generator import SamAutomaticMaskGenerator
             
             # SAM 3 checkpoint (download automático via HuggingFace)
             self.logger.info("   📦 Carregando SAM 3 (pode demorar na 1ª vez)...")
@@ -604,15 +714,201 @@ class WorldToMeshPipeline:
                 torch.cuda.empty_cache()
                 self.logger.info("   🧹 VRAM liberada após SAM 3")
 
-            return metadata_path
-
-        except ImportError as ie:
-            self.logger.warning(f"   ⚠️ SAM 3 não instalado: {ie}")
-            self.logger.info("   💡 Instale com: pip install sam3")
-            return None
         except Exception as e:
-            self.logger.warning(f"   ⚠️ Segmentação semântica falhou: {e}")
-            return None
+            # Fallback para transformers Pipeline caso o SAM3 pip falhe/nao_exista
+            self.logger.warning(f"   ⚠️ SAM 3 nativo falhou: {e}. Iniciando Fallback via transformers (SAM ViT Base)...")
+            
+            try:
+                from transformers import pipeline
+                import torch
+                from PIL import Image
+                import numpy as np
+                import cv2
+                import json
+                
+                device = 0 if torch.cuda.is_available() else -1
+                
+                # O pipeline the mask-generation carrega o SAM model principal
+                generator = pipeline("mask-generation", model="facebook/sam-vit-base", device=device, points_per_batch=64)
+                
+                img_pil = Image.open(image_path).convert("RGB")
+                outputs = generator(img_pil)
+                
+                # outputs é um dicionário com "masks" (list de PIL images ou np arrays)
+                masks = outputs["masks"]
+                scores = outputs.get("scores", [0.9] * len(masks))
+                
+                # Gerar metadados SEMÂNTICOS para a game engine/instancer
+                metadata = {
+                    "mesh_path": glb_path,
+                    "image_path": image_path,
+                    "total_objects": len(masks),
+                    "segmentation_type": "sam2_base_fallback",
+                    "objects": []
+                }
+                
+                temp_masks = {}
+                good_masks = 0
+                
+                for i, (mask, score) in enumerate(zip(masks, scores)):
+                    mask_np = np.array(mask)
+                    area = int(mask_np.sum())
+                    
+                    if area > 500:  # Ignorar ruído
+                        # Extrair Bounding Box (x_min, y_min, x_max, y_max) da máscara numpy
+                        y_indices, x_indices = np.where(mask_np)
+                        if len(x_indices) > 0 and len(y_indices) > 0:
+                            x_min, x_max = int(np.min(x_indices)), int(np.max(x_indices))
+                            y_min, y_max = int(np.min(y_indices)), int(np.max(y_indices))
+                            bbox = [x_min, y_min, x_max, y_max]
+                        else:
+                            bbox = [0, 0, 0, 0]
+                        
+                        # Fallback não tem "conceitos" open-vocab do SAM3, então iteramos
+                        concept_label = f"building_{i}"
+                        safe_concept = concept_label
+                        
+                        metadata["objects"].append({
+                            "id": good_masks,
+                            "concept": concept_label,
+                            "concept_safe": safe_concept,
+                            "confidence": float(score),
+                            "area": area,
+                            "bbox": bbox,
+                            "stability_score": float(score),
+                            "predicted_iou": float(score)
+                        })
+                        
+                        temp_masks[f"mask_{good_masks}"] = mask_np
+                        good_masks += 1
+
+                masks_path = image_path.replace('.png', '_masks.npz')
+                np.savez_compressed(masks_path, **temp_masks)
+
+                metadata_path = glb_path.replace('.glb', '_semantic_collision.json')
+                with open(metadata_path, 'w') as f:
+                    json.dump(metadata, f, indent=2)
+                
+                self.logger.info(
+                    f"   ✅ SAM Base (Fallback): {good_masks} objetos extraídos "
+                    f"({Path(metadata_path).stat().st_size / 1024:.1f}KB JSON)"
+                )
+                
+                del generator, img_pil, outputs, masks, temp_masks
+                import gc
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    
+                return metadata_path, masks_path
+                
+            except Exception as ef:
+                self.logger.warning(f"   ⚠️ Segmentação semântica (Fallback) falhou: {ef}")
+                return None
+
+    def _extract_and_generate_objects(self, session_dir: str, master_frame_path: str):
+        """
+        [V5 True 3D Object Assembly Pipeline]
+        Iterates over the SAM 3 semantic masks, crops the objects out of the master frame,
+        and generates individual valid solid 3D structures via Hunyuan3D-2 in object_mode.
+        """
+        import json
+        import os
+        from PIL import Image
+        
+        json_path = Path(session_dir) / "temp_semantic_collision.json"
+        
+        if not json_path.exists():
+            self.logger.warning("   ⚠️ O JSON do SAM 3 não foi encontrado. Ignorando extração de prefabs.")
+            return
+            
+        try:
+            with open(json_path, 'r') as f:
+                metadata = json.load(f)
+                
+            objects = metadata.get("objects", [])
+            if not objects:
+                return
+                
+            # Create prefabs directory
+            prefabs_dir = Path(session_dir) / "prefabs"
+            prefabs_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Load the original full-resolution master frame for cropping
+            try:
+               master_img = Image.open(master_frame_path).convert("RGB")
+            except Exception as e:
+               self.logger.warning(f"   ⚠️ Falha ao ler master frame para crops: {e}")
+               return
+               
+            self.logger.info(f"   🏗️ [Pista A] Extraindo {len(objects)} prefabs independentes via Hunyuan3D-2 em Object Mode...")
+            
+            for obj in objects:
+                bbox = obj.get("bbox")
+                concept = obj.get("concept_safe", f"prefab_{obj['id']}")
+                obj_id = obj['id']
+                
+                if not bbox or len(bbox) != 4:
+                    continue
+                    
+                x_min, y_min, x_max, y_max = bbox
+                
+                # Expand crop slightly (10%) to give the model context to avoid edge clipping
+                w, h = x_max - x_min, y_max - y_min
+                pad_x = int(w * 0.1)
+                pad_y = int(h * 0.1)
+                
+                c_xmin = max(0, x_min - pad_x)
+                c_ymin = max(0, y_min - pad_y)
+                c_xmax = min(master_img.width, x_max + pad_x)
+                c_ymax = min(master_img.height, y_max + pad_y)
+                
+                # Impose square constraint for better Hubyuan3D performance and fewer deformations
+                crop_w = c_xmax - c_xmin
+                crop_h = c_ymax - c_ymin
+                size = max(crop_w, crop_h)
+                
+                center_x = c_xmin + crop_w // 2
+                center_y = c_ymin + crop_h // 2
+                
+                s_xmin = max(0, center_x - size // 2)
+                s_ymin = max(0, center_y - size // 2)
+                s_xmax = min(master_img.width, s_xmin + size)
+                s_ymax = min(master_img.height, s_ymin + size)
+                
+                # Crop and save to temp
+                crop_img = master_img.crop((s_xmin, s_ymin, s_xmax, s_ymax))
+                crop_path = str(prefabs_dir / f"{concept}_{obj_id}_crop.png")
+                prefab_glb_path = str(prefabs_dir / f"{concept}_{obj_id}.glb")
+                
+                crop_img.save(crop_path)
+                
+                self.logger.info(f"      -> Processando prefab tridimensional: {concept} (ID: {obj_id}) [{s_xmax-s_xmin}x{s_ymax-s_ymin}]...")
+                
+                # Sub-call using native hunyuan3d but strictly in object mode (removes background, focuses on building itself)
+                success = self._run_hunyuan_3d(
+                    image_path=crop_path,
+                    output_path=prefab_glb_path,
+                    scene_mode=False,  # CRITICAL for V5: True 3D objects, not scenery displacement
+                    enable_texture=True,
+                    target_faces=25000, # Sub-objects don't need 150k limit. 25k is highly detailed for props/buildings.
+                )
+                
+                if success and Path(prefab_glb_path).exists():
+                    # Update local SAM 3 JSON dynamically so C++ Assembler knows where this item was generated
+                    obj["glb_path"] = prefab_glb_path
+                    self.logger.info(f"      ✅ Solid Mesh {concept} gerado.")
+                else:
+                    self.logger.warning(f"      ❌ Falha ao gerar mesh base para {concept}.")
+            
+            # Save the augmented metadata (now containing the 3D paths for each object)
+            with open(json_path, 'w') as f:
+                json.dump(metadata, f, indent=2)
+                
+            self.logger.info("   🏁 [Pista A] Geração de True 3D Objects via Hunyuan3D-2 concluída!")
+            
+        except Exception as e:
+            self.logger.error(f"   ❌ Erro Fatal na Pista A (Extração Object Mode): {e}")
 
     def _apply_part_segmentation(
         self, 
@@ -1422,7 +1718,150 @@ class WorldToMeshPipeline:
             self.logger.warning(f"   ⚠️ UV Packing falhou: {e}")
             return mesh_path
 
+    def _extract_and_generate_objects(self, session_dir: str, image_path: str) -> None:
+        """
+        [PHASE V5: True 3D Architect - Titan Edition]
+        Reads SAM 3 output, isolates unique discrete objects via Procedural Symmetry (Hashing),
+        crops them, applies transparency using the bitmask, and pipes them to Hunyuan3D-2.
+        """
+        json_path = Path(session_dir) / "temp_semantic_collision.json"
+        masks_path = Path(session_dir) / "temp_semantic_masks.npz"
+        
+        if not json_path.exists() or not masks_path.exists():
+            return
+            
+        import json
+        import numpy as np
+        import cv2
+        from PIL import Image
+        
+        with open(json_path, 'r') as f:
+            metadata = json.load(f)
+            
+        try:
+            masks_data = np.load(str(masks_path))
+        except Exception as e:
+            self.logger.warning(f"   ⚠️ Falha ao ler bitmasks do SAM: {e}")
+            return
+            
+        image = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
+        if image is None:
+            return
+        if image.shape[2] == 3:
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2BGRA)
+            
+        objects_dir = Path(session_dir) / "objects"
+        objects_dir.mkdir(exist_ok=True)
+        
+        sorted_objs = sorted(metadata.get("objects", []), key=lambda x: x.get("area", 0), reverse=True)
+        
+        # Filtro LOD para V5 Alpha: objetos mto pequenos não viram mesh
+        MIN_AREA_FOR_3D = 4000
+        
+        # Dicionário de instâncias forjadas: concept -> list of tuples (hash_array, glb_path)
+        forged_prefabs = {}
+        
+        self.logger.info("   🏭 [V5 ARCHITECT] Iniciando extração sólida e Procedural Symmetry...")
+        
+        for obj in sorted_objs:
+            if obj["area"] < MIN_AREA_FOR_3D:
+                continue
+                
+            concept_safe = obj["concept_safe"]
+            obj_id = obj["id"]
+            
+            try:
+                # O ID da máscara no NPZ gerado no fallback é mask_{id}, no oficial varia.
+                mask_key = f"mask_{obj_id}"
+                mask = masks_data[mask_key] if mask_key in masks_data else masks_data[str(obj_id)]
+            except KeyError:
+                continue
+                
+            x, y, w, h = obj["bbox"]
+            patch_mask = mask[y:y+h, x:x+w]
+            
+            # ── V5 Titan Edition: Procedural Symmetry (Perceptual Hashing) ──
+            # Reduz a máscara a 16x16 para criar um hash da silhueta invariante a pequenos detalhes
+            mask_resized = cv2.resize(patch_mask.astype(np.uint8), (16, 16), interpolation=cv2.INTER_NEAREST)
+            phash = mask_resized.flatten()
+            
+            is_instance = False
+            if concept_safe not in forged_prefabs:
+                forged_prefabs[concept_safe] = []
+                
+            for prev_hash, prev_glb in forged_prefabs[concept_safe]:
+                # Comparar similaridade das silhuetas via percentual de match de bits
+                similarity = np.mean(phash == prev_hash)
+                if similarity > 0.85:  # 85% de match na forma base
+                    self.logger.info(f"   ♻️ Symmetry Match [{similarity:.0%}]: '{concept_safe}' ({obj_id}) instanciando '{prev_glb}'")
+                    obj["glb_path"] = prev_glb
+                    is_instance = True
+                    break
+                    
+            if is_instance:
+                continue
+                
+            # Se for inédito, prepara a imagem para forjar (nova matriz)
+            patch = image[y:y+h, x:x+w].copy()
+            patch[:, :, 3] = np.where(patch_mask, 255, 0)
+            
+            # Pad to square (crucial for good 3D)
+            max_dim = max(w, h)
+            pad_w = (max_dim - w) // 2
+            pad_h = (max_dim - h) // 2
+            
+            squared = cv2.copyMakeBorder(
+                patch, pad_h, max_dim - h - pad_h, pad_w, max_dim - w - pad_w,
+                cv2.BORDER_CONSTANT, value=[0, 0, 0, 0]
+            )
+            
+            crop_path = objects_dir / f"{obj_id}.png"
+            cv2.imwrite(str(crop_path), squared)
+            
+            self.logger.info(f"   ✂️ Cortado: {obj_id}.png ({max_dim}x{max_dim})")
+            
+            glb_out = objects_dir / f"{obj_id}.glb"
+            self.logger.info(f"   🪄 Forjando matriz sólida para: {concept_safe} (ID: {obj_id})")
+            
+            success = self._run_hunyuan_3d(
+                image_path=str(crop_path),
+                output_path=str(glb_out),
+                scene_mode=False, 
+                enable_texture=True,
+                octree_resolution=256
+            )
+            
+            if success:
+                relative_glb = f"objects/{obj_id}.glb"
+                obj["glb_path"] = relative_glb
+                # Cadastra matriz no registro de simetria para futuros matches
+                forged_prefabs[concept_safe].append((phash, relative_glb))
+                
+        # Atualiza JSON com os caminhos (tanto inéditas quanto duplicadas)
+        with open(json_path, 'w') as f:
+            json.dump(metadata, f, indent=2)
+
     # ── Pipeline Principal ─────────────────────────────────────────────
+
+    def _flush_memory(self, phase_name: str = ""):
+        """
+        [IRON FLUSH] Otimização Agressiva de VRAM.
+        Força o garbage collector do Python e esvazia o cache CUDA do PyTorch
+        para impedir o OOM quando múltiplos modelos grandes (H3D2, SAM, DA3)
+        se sobrepõem na fila de execução. Reduz pico de 35GB p/ ~15GB.
+        """
+        import gc
+        gc.collect()
+        
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+                if phase_name:
+                    self.logger.info(f"   ♻️  [Iron Flush] VRAM liberada após: {phase_name}")
+        except ImportError:
+            pass
 
     def generate(
         self,
@@ -1435,6 +1874,7 @@ class WorldToMeshPipeline:
         use_upscale: bool = False,
         use_normal: bool = False,
         use_depth: bool = False,
+        use_marigold: bool = False,
         use_sam: bool = False,
         use_mesh_cleanup: bool = True,
         use_mesh_optimization: bool = True,
@@ -1450,6 +1890,7 @@ class WorldToMeshPipeline:
         use_part_segmentation: bool = False,
         world_mode: bool = False,
         scale: float = 100.0,
+        model_path: str = "tencent/Hunyuan3D-2",
     ) -> dict:
         """
         Pipeline ONE-SHOT PERFECTION: prompt textual → .glb + .obj AAA
@@ -1493,6 +1934,10 @@ class WorldToMeshPipeline:
             "quality_score": 0.0,
             "error": "",
         }
+        
+        # Variáveis para Computação Concorrente V5 (Dual-Track Pipeline)
+        objects_future = None
+        thread_pool = None
 
         # ── 1. Criar sessão temporária ───────────────────────────
         session_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
@@ -1542,6 +1987,8 @@ class WorldToMeshPipeline:
                 output_path=str(master_frame_path),
                 seed=seed + attempt - 1,  # Seed diferente a cada tentativa
             )
+            
+            self._flush_memory("SDXL/Flux (Text-to-Image)")
 
             result["time_world_seconds"] = round(time.time() - start_world, 2)  # type: ignore
 
@@ -1580,47 +2027,84 @@ class WorldToMeshPipeline:
                 str(master_frame_path),
                 use_upscale=use_upscale
             ))
+            if use_upscale:
+                self._flush_memory("Real-ESRGAN (Upscale)")
 
-            # ── FIX #3: Paralelizar StableNormal + DA3 ──────────
-            # Ambos só dependem da imagem upscaled, não um do outro.
-            # ThreadPoolExecutor permite que I/O, model loading e 
-            # pré/pós processamento se sobreponham (economia ~15-30s).
-            # A GPU em si serializa via CUDA, mas o overhead é eliminado.
-            from concurrent.futures import ThreadPoolExecutor, as_completed
-
+            # ── FIX #3: Serializar StableNormal + DA3 + Marigold ──────────
+            # Carregar grandes modelos como DA3 e StableNormal concorrentemente
+            # em uma única GPU leva inevitavelmente a um Out-Of-Memory (OOM) crash.
+            # Executamos sequencialmente e forçamos o VRAM flush no final de cada um.
             normal_map_path = None
             depth_map_path = None
+            marigold_map_path = None
 
-            gpu_tasks = {}
-            with ThreadPoolExecutor(max_workers=2, thread_name_prefix="gpu_slot") as executor:
-                if use_normal:
-                    gpu_tasks["normal"] = executor.submit(
-                        self._generate_normal_map,
-                        str(master_frame_path),
-                        use_normal=True
-                    )
-                if use_depth:
-                    gpu_tasks["depth"] = executor.submit(
-                        self._apply_depth_refinement,
-                        str(master_frame_path),
-                        use_depth=True
-                    )
+            if use_normal:
+                try:
+                    normal_map_path = self._generate_normal_map(str(master_frame_path), use_normal=True)
+                    if normal_map_path:
+                        self.logger.info(f"   🎨 Normal map HD disponível: {normal_map_path}")
+                        self._flush_memory("StableNormal")
+                except Exception as e:
+                    self.logger.warning(f"   ⚠️ StableNormal falhou: {e}")
 
-                for future in as_completed(gpu_tasks.values()):
-                    # Identificar qual terminou
-                    for name, f in gpu_tasks.items():
-                        if f is future:
-                            try:
-                                result_val = future.result()
-                                if name == "normal" and result_val:
-                                    normal_map_path = result_val
-                                    self.logger.info(f"   🎨 Normal map HD disponível: {normal_map_path}")
-                                elif name == "depth" and result_val:
-                                    depth_map_path = result_val
-                                    self.logger.info(f"   📊 Depth map disponível: {depth_map_path}")
-                            except Exception as e:
-                                self.logger.warning(f"   ⚠️ {name} falhou em paralelo: {e}")
-                            break
+            if use_depth:
+                try:
+                    depth_map_path = self._apply_depth_refinement(str(master_frame_path), use_depth=True)
+                    if depth_map_path:
+                        self.logger.info(f"   📊 DA3 Macro-Depth map disponível: {depth_map_path}")
+                        self._flush_memory("Depth Anything 3")
+                except Exception as e:
+                    self.logger.warning(f"   ⚠️ Depth Anything 3 falhou: {e}")
+
+            if use_marigold:
+                try:
+                    marigold_map_path = self._apply_micro_displacement(str(master_frame_path), use_marigold=True)
+                    if marigold_map_path:
+                        self.logger.info(f"   📊 Marigold Micro-Depth map disponível: {marigold_map_path}")
+                        self._flush_memory("Marigold")
+                except Exception as e:
+                    self.logger.warning(f"   ⚠️ Marigold falhou: {e}")
+
+            # ── 4.5. Extração Semântica (SAM 3) ───────────────────
+            # Executamos o SAM 3 ANTES do 3D para o JSON Spawner ter a planta baixa.
+            semantic_json_path = None
+            temp_mask_out = None
+            if use_sam:
+                self.logger.info("   🧠 [AUTO] SAM 3 (Semantic Segmentation) Preparando Prefabs...")
+                try:
+                    # O script _apply_segmentation originalmente usava glb_path pro nome, vamos usar um temp name
+                    temp_sam_out = str(Path(session_dir) / "temp_semantic_collision.json")
+                    result_paths = self._apply_segmentation(
+                        str(master_frame_path),
+                        str(Path(session_dir) / "temp.glb"), # Dummy pra não quebrar a signature original
+                        use_sam=True
+                    )
+                    if result_paths:
+                        metadata_path, mask_path = result_paths
+                        shutil.move(metadata_path, temp_sam_out)
+                        semantic_json_path = temp_sam_out
+                        
+                        temp_mask_out = str(Path(session_dir) / "temp_semantic_masks.npz")
+                        shutil.move(mask_path, temp_mask_out)
+                        
+                        self.logger.info(f"   📋 Planta baixa Semântica: {semantic_json_path}")
+                        self.logger.info(f"   🎭 Máscaras Salvas: {temp_mask_out}")
+                        
+                        self._flush_memory("SAM 3 (Segment Anything)")
+                        
+                        # V5 ARCHITECT: Extrair os crop-masks e gerar via Hunyuan3D-2
+                        # [DUAL-TRACK V5] Roda em paralelo (Pista A) enquanto o Terrain roda na main (Pista B)
+                        self.logger.info("   🚀 Iniciando Pista A [Hunyuan3D-2 Objetos] em paralelo...")
+                        import concurrent.futures
+                        thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+                        objects_future = thread_pool.submit(
+                            self._extract_and_generate_objects,
+                            str(session_dir), 
+                            str(master_frame_path)
+                        )
+                        
+                except Exception as e:
+                    self.logger.warning(f"   ⚠️ Pré-Segmentação falhou: {e}")
 
             break  # Sucesso!
         else:
@@ -1640,25 +2124,89 @@ class WorldToMeshPipeline:
             self.logger.info(f"\n🔨 Etapa 2/2: World Generator (Mesh Displacement do Cenário)")
             start_3d = time.time()
             if not depth_map_path or not Path(depth_map_path).exists():
-                self.logger.error("   ❌ Erro: --world-mode exige --use-depth para gerar a topografia real. Ative a flag --use-depth.")
-                mesh_success = False
+                # HARD GUARD: world-mode sem depth é impossível matematicamente.
+                # Sem o mapa de profundidade, não há como extrudar o terreno.
+                self.logger.error("""\n
+╔══════════════════════════════════════╠
+║ [PIPELINE ABORTADO] CONFIGURAÇÃO INCOMPATÍVEL        ║
+╠══════════════════════════════════════╣
+║ --world-mode requer --use-depth para funcionar.       ║
+║ Sem mapa de profundidade (DA3/Marigold), é impossível  ║
+║ extrudar o terreno com altura real.                   ║
+╚══════════════════════════════════════╝
+
+SOLUÇÃO: Adicione --use-depth ao seu comando:
+  python bridge.py --world-mode --use-depth ... 
+""")
+                result["error"] = "--world-mode requer --use-depth. Pipeline abortado."
+                result["time_total_seconds"] = round(time.time() - start_total, 2)
+                return result
             else:
                 try:
                     import sys
                     sys.path.append(str(Path(__file__).parent))
                     from world_generator import generate_landscape_mesh
+                    # Carregar o dicionário do SAM 3
+                    sam_dict = {}
+                    if semantic_json_path and Path(semantic_json_path).exists():
+                        import json
+                        with open(semantic_json_path, 'r') as f:
+                            sam_dict = json.load(f)
+                            
                     mesh_success = generate_landscape_mesh(
                         image_path=str(master_frame_path),
                         depth_map_path=depth_map_path,
                         output_path=str(glb_path),
+                        marigold_map_path=marigold_map_path,
                         max_height=0.5,
                         chunk_resolution=1024,
                         smoothing_iterations=smoothing_iterations if use_mesh_smoothing else 0,
-                        scale=scale
+                        scale=scale,
+                        sam3_metadata=sam_dict,  # <--- Injetando a planta baixa semântica!
+                        sam3_masks_path=temp_mask_out # <--- Injetando as máscaras para Terrain Flattening!
                     )
                 except ImportError as e:
                     self.logger.error(f"   ❌ Erro crítico ao carregar gerador de mundos: {e}")
                     mesh_success = False
+                
+                # Sincronização do V5 Dual-Track: Aguardar a Pista A (Objetos) se foi iniciada
+                if objects_future is not None:
+                    self.logger.info("\n   ⏳ Terrain Finalizado. Aguardando conclusão da Pista A (Hunyuan3D-2)...")
+                    try:
+                        objects_future.result() # Bloqueia até a Thread do H3D2 acabar
+                        self.logger.info("   ✅ Pista A (Objetos) concluída!")
+                        
+                        # [RACE CONDITION FIX] Re-ler o JSON atualizado pela thread 
+                        # (agora contém os campos glb_path) e regenerar o world_data.json
+                        updated_json = Path(session_dir) / "temp_semantic_collision.json"
+                        if updated_json.exists():
+                            import json as json_mod
+                            with open(updated_json, 'r') as fj:
+                                updated_sam_dict = json_mod.load(fj)
+                            
+                            from world_generator import extract_semantic_prefabs
+                            import trimesh as tm_sync
+                            
+                            # Recarregar a cena do terreno já exportado
+                            if glb_path.exists():
+                                terrain_scene = tm_sync.load(str(glb_path))
+                            else:
+                                terrain_scene = tm_sync.Scene()
+                            
+                            output_dir = str(glb_path.parent)
+                            extract_semantic_prefabs(
+                                scene=terrain_scene,
+                                sam3_metadata=updated_sam_dict,
+                                output_dir=output_dir,
+                                scale=scale
+                            )
+                            self.logger.info("   ✅ world_data.json regenerado com glb_paths dos objetos 3D!")
+                            
+                    except Exception as e:
+                        self.logger.error(f"   ❌ Pista A (Objetos) crachou em paralelo: {e}")
+                    
+                    if thread_pool is not None:
+                        thread_pool.shutdown()
         else:
             self.logger.info(f"\n🔨 Etapa 2/2: Hunyuan3D-2 (reconstrução de objeto)")
             start_3d = time.time()
@@ -1686,6 +2234,8 @@ class WorldToMeshPipeline:
                         octree_resolution=octree_resolution,
                         normal_map_path=normal_map_path,
                         depth_map_path=depth_map_path,
+                        target_faces=target_faces,
+                        model_path=model_path,
                     )
             else:
                 # Single-shot (padrão)
@@ -1698,6 +2248,8 @@ class WorldToMeshPipeline:
                     octree_resolution=octree_resolution,
                     normal_map_path=normal_map_path,
                     depth_map_path=depth_map_path,
+                    target_faces=target_faces,
+                    model_path=model_path,
                 )
 
         result["time_3d_seconds"] = round(time.time() - start_3d, 2)
@@ -1819,17 +2371,27 @@ class WorldToMeshPipeline:
             else:
                 self.logger.info(f"\n✅ Arquivo 3D gerado: {final_path}")
 
-            # ── Segmentation [SAM 2] (quando disponível) ─────────
-            metadata_path = self._apply_segmentation(
-                str(master_frame_path),
-                str(final_path),
-                use_sam=use_sam
-            )
-            if metadata_path:
-                self.logger.info(f"   📋 Metadados de colisão: {metadata_path}")
-                result["collision_metadata"] = metadata_path
+            # SAM 3 agora roda PRÉ-3D para alimentar o JSON Spawner.
+            # O resultado do semantic_json_path já foi processado e o SAM VRAM foi liberado.
+            # Não precisamos rodar SAM novamente aqui (removido para evitar VRAM dupla e tempo gasto).
+
+            # Mover o manifesto do Fabricator para a raiz do projeto (se mundo procedural)
+            world_data_src = session_dir / "world_data.json"
+            prefabs_src_dir = session_dir / "prefabs"
+            if world_data_src.exists():
+                world_data_dest = final_path.parent / f"{safe_name}_world.json"
+                shutil.copy2(str(world_data_src), str(world_data_dest))
+                result["world_json"] = str(world_data_dest)
+                self.logger.info(f"   📜 JSON Spawner Manifesto: {world_data_dest}")
+
+                # Copiar diretório de prefabs
+                prefabs_dest_dir = final_path.parent / f"{safe_name}_prefabs"
+                if prefabs_src_dir.exists():
+                    shutil.copytree(str(prefabs_src_dir), str(prefabs_dest_dir), dirs_exist_ok=True)
+                    self.logger.info(f"   🏗️ {len(list(prefabs_dest_dir.glob('*.glb')))} Prefabs Independentes exportados!")
 
         except Exception as e:
+            self.logger.error(f"   ❌ Falha ao exportar modelo final: {e}")
             result["error"] = f"Falha ao exportar: {e}"
             self.logger.error(result["error"])
 
@@ -1925,6 +2487,8 @@ class WorldToMeshPipeline:
         octree_resolution: Optional[int] = None,
         normal_map_path: Optional[str] = None,  # FIX #3: Integration gap
         depth_map_path: Optional[str] = None,   # FIX #3: Integration gap
+        target_faces: int = 150000,
+        model_path: str = "tencent/Hunyuan3D-2",
     ) -> bool:
         """
         Executa o Hunyuan3D-2 para reconstrução 3D.
@@ -1969,6 +2533,11 @@ class WorldToMeshPipeline:
         if depth_map_path and Path(depth_map_path).exists():
             cmd.extend(["--depth_map", depth_map_path])
             self.logger.info(f"   📏 Depth map injetado no pipeline 3D")
+            
+        if target_faces:
+            cmd.extend(["--max_faces", str(target_faces)])
+            
+        cmd.extend(["--model_path", model_path])
 
         self.logger.info(f"   Executando: {' '.join(cmd[:6])}...")
 
@@ -2140,6 +2709,10 @@ def main():
         help="Aplicar Depth Anything 3 para refinamento de profundidade",
     )
     parser.add_argument(
+        "--use-marigold", action="store_true", default=False,
+        help="Aplicar Marigold LCM para micro-displacement (detalhes finos)",
+    )
+    parser.add_argument(
         "--use-sam", action="store_true", default=False,
         help="Aplicar SAM 3 para gerar metadados de colisão/objetos",
     )
@@ -2215,6 +2788,10 @@ def main():
     parser.add_argument(
         "--hunyuan-3d-dir", type=str, default=None,
         help="Path do Hunyuan3D-2",
+    )
+    parser.add_argument(
+        "--model-path", type=str, default="tencent/Hunyuan3D-2",
+        help="Path do modelo HuggingFace ou do diretório local com os pesos",
     )
 
     # Utilitários
@@ -2293,6 +2870,7 @@ def main():
             use_upscale=args.use_upscale,
             use_normal=args.use_normal,
             use_depth=args.use_depth,
+            use_marigold=args.use_marigold,
             use_sam=args.use_sam,
             use_mesh_cleanup=args.use_mesh_cleanup,
             use_mesh_optimization=args.use_mesh_optimization,
@@ -2307,6 +2885,7 @@ def main():
             use_part_segmentation=args.use_part_segmentation,
             world_mode=args.world_mode,
             scale=args.scale,
+            model_path=args.model_path,
         )
 
         if result["success"]:

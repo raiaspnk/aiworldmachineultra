@@ -1,4 +1,21 @@
 // ============================================================================
+//  [DEPRECATED] MONSTER_KERNELS.CU – MonsterCore v2 (LEGACY - NÃO COMPILADO)
+// ============================================================================
+//
+//  ⚠️  ARQUIVO LEGADO — NÃO ESTÁ INCLUÍDO NA COMPILAÇÃO ATUAL
+//
+//  Este arquivo é o kernel da versão MonsterCore v2.
+//  O arquivo ATIVO compilado pelo setup.py é: monster_core_kernels.cu (v3)
+//
+//  Motivo da substituição (v2 → v3):
+//    - v3 tem Warp Shuffle Reduction (sem atomicAdd por thread)
+//    - v3 tem Bilateral Smoothing no Taubin (anti-melting nas quinas)
+//    - v3 tem CSR Graph para Laplacian (menor uso de memória)
+//
+//  Manter esse arquivo apenas para referência histórica.
+//  Para usar, mova para /archive/ quando for limpar o projeto.
+//
+// ============================================================================
 //  MONSTER_KERNELS.CU – Pure CUDA Kernels para o MonsterCore v2
 // ============================================================================
 //
