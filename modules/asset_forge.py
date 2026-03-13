@@ -87,9 +87,10 @@ class AssetForge:
             
             logger.info("[AssetForge] TRELLIS 2 carregado com sucesso!")
             
-        except ImportError:
+        except ImportError as e:
             logger.warning(
-                "[AssetForge] TRELLIS 2 não instalado. Usando fallback de geometria procedural.\n"
+                f"[AssetForge] TRELLIS 2 não instalado ou erro de dependência: {e}\n"
+                "Verifique se as dependências (spconv, xformers, etc) estão presentes.\n"
                 "Para instalar: git clone https://github.com/microsoft/TRELLIS.git && cd TRELLIS && pip install -e ."
             )
             self.trellis_pipeline = "FALLBACK_PROCEDURAL"
