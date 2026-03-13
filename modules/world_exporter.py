@@ -332,9 +332,6 @@ class WorldExporter:
 
         # FIX #46: Strip prompt/IP dos extras
         gltf_json = {
-            "asset": {
-                "version": "2.0",
-                "generator": "AWE_V10_Surgery_WorldExporter"
             "asset": {"version": "2.0", "generator": "AI_World_Engine_V11"},
             "extensionsUsed": ["MSFT_lod"],
             "scene": 0,
