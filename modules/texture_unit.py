@@ -60,7 +60,8 @@ class TextureUnit:
                 torch_dtype=torch.float16,
             )
             self.flux_inpaint_model.to(self.device)
-            self.flux_inpaint_model.enable_model_cpu_offload()
+            # V8 Enterprise: Disabled CPU offload to save System RAM
+            # self.flux_inpaint_model.enable_model_cpu_offload()
             
             logger.info("[Texture Unit] Inpaint Pipeline carregado!")
             

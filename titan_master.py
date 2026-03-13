@@ -140,32 +140,14 @@ class TitanMaster:
         logger.info("[FIX #1] Warming up models (pre-loading to VRAM)...")
         
         try:
-            # Warmup VisionLab (FLUX + SAM3 + Depth V3)
-            logger.info("   [Warmup] VisionLab: FLUX.2-dev...")
-            self.vision_lab._load_flux()
-            logger.info("   [Warmup] VisionLab: SAM 3...")
-            self.vision_lab._load_sam3()
-            logger.info("   [Warmup] VisionLab: Depth Anything V3...")
-            self.vision_lab._load_depth()
-            
-            # Libera VisionLab para dar espaço pro Forge
-            self.vision_lab.unload_all()
-            
-            # Warmup AssetForge (TRELLIS 2)
-            logger.info("   [Warmup] AssetForge: TRELLIS 2...")
-            self.asset_forge._load_trellis()
-            self.asset_forge.unload_all()
-            
-            # Warmup TextureUnit (Inpaint + ESRGAN)
-            logger.info("   [Warmup] TextureUnit: SD2 Inpaint + Real-ESRGAN...")
-            self.texture_unit._load_flux_inpaint()
-            self.texture_unit._load_esrgan()
-            self.texture_unit.unload_all()
-            
-            logger.info("[FIX #1] Warmup completo! Modelos pré-cacheados pelo OS.")
+            # FIX: Disabled aggressive warmup to avoid System RAM OOM on Lightning.ai
+            # Loading all massive models sequentially causes RAM fragmentation and crashes.
+            # We will rely entirely on the Lazy Loading implemented in each module.
+            logger.info("   [Warmup] Bypassing model loading to save System RAM...")
+            logger.info("[FIX #1] Warmup stage modified. Models will load strictly on-demand.")
             
         except Exception as e:
-            logger.warning(f"[FIX #1] Warmup parcial: {e}. Models carregarão on-demand.")
+            logger.warning(f"[FIX #1] Warmup falhou: {e}. Models carregarão on-demand.")
 
     # =========================================================================
     # FIX #3: CHECKPOINT COM FSYNC + CRC32

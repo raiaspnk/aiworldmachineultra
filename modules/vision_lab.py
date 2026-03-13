@@ -75,8 +75,8 @@ class VisionLab:
             )
             self.flux_model.to(self.device)
             
-            # V8 Enterprise: Ativa otimizações de memória
-            self.flux_model.enable_model_cpu_offload()
+            # V8 Enterprise: Disabled CPU offload as it uses too much System RAM on Lightning nodes
+            # self.flux_model.enable_model_cpu_offload()
             
             logger.info("[VisionLab] FLUX.1-dev carregado com sucesso!")
             
