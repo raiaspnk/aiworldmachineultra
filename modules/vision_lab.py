@@ -70,7 +70,7 @@ class VisionLab:
             from diffusers import FluxPipeline
             
             self.flux_model = FluxPipeline.from_pretrained(
-                "black-forest-labs/FLUX.2-dev",
+                "black-forest-labs/FLUX.1-dev",
                 torch_dtype=torch.bfloat16,
             )
             self.flux_model.to(self.device)
