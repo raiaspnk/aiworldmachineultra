@@ -81,7 +81,7 @@ class AssetForge:
             from trellis.pipelines import TrellisImageTo3DPipeline
             
             self.trellis_pipeline = TrellisImageTo3DPipeline.from_pretrained(
-                "JeffreyXiang/TRELLIS-2-image-large"
+                "microsoft/TRELLIS-image-large"
             )
             self.trellis_pipeline.to(self.device)
             
