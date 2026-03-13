@@ -74,6 +74,8 @@ class VisionLab:
                 torch_dtype=torch.bfloat16,
             )
             self.flux_model.to(self.device)
+            self.flux_model.enable_attention_slicing()
+            # self.flux_model.enable_xformers_memory_efficient_attention()  # Comentado por segurança
             
             # V8 Enterprise: Disabled CPU offload as it uses too much System RAM on Lightning nodes
             # self.flux_model.enable_model_cpu_offload()
