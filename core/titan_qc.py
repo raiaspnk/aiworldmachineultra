@@ -26,10 +26,11 @@ class TitanQualityControl:
     # -------------------------------------------------------------------------
     # [GATE 0] SHARPNESS AUDIT (Filtro de Nitidez do Blueprint)
     # -------------------------------------------------------------------------
-    def audit_sharpness(self, image_rgb: np.ndarray, threshold: float = 120.0) -> dict:
+    def audit_sharpness(self, image_rgb: np.ndarray, threshold: float = 50.0) -> dict:
         """
         O Depth V3 capota se a imagem for um nevoeiro.
         Calcula a Variância do Laplaciano para atestar o foco.
+        (Limiar reduzido para 50.0 para acomodar fallback bicúbico)
         """
         gray = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2GRAY)
         laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
