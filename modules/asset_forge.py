@@ -74,11 +74,11 @@ class AssetForge:
         
         try:
             # FIX #54: TRELLIS repo tem os modulos na raiz, mas sem setup.py
-            trellis_path = os.path.abspath("TRELLIS")
+            trellis_path = os.path.abspath("TRELLIS2")
             if trellis_path not in sys.path:
                 sys.path.insert(0, trellis_path)
                 
-            from trellis.pipelines import TrellisImageTo3DPipeline
+            from trellis2.pipelines import TrellisImageTo3DPipeline
             
             self.trellis_pipeline = TrellisImageTo3DPipeline.from_pretrained(
                 "microsoft/TRELLIS-image-large"
