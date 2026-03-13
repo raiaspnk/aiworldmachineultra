@@ -134,7 +134,8 @@ class VisionLab:
         try:
             from transformers import AutoImageProcessor, AutoModelForDepthEstimation
             
-            model_id = "depth-anything/Depth-Anything-V3-Small-hf"
+            # Using Depth Anything V2 since V3 does not have a native HF transformers pipeline yet
+            model_id = "depth-anything/Depth-Anything-V2-Small-hf"
             
             self.depth_processor = AutoImageProcessor.from_pretrained(model_id)
             self.depth_model = AutoModelForDepthEstimation.from_pretrained(
