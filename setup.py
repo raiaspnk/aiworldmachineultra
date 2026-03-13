@@ -1,26 +1,37 @@
 from setuptools import setup
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
+import os
 
-# ATALHO HACKER: Desliga a checagem chata de versão do PyTorch vs NVCC
-import torch.utils.cpp_extension
-torch.utils.cpp_extension._check_cuda_version = lambda *args, **kwargs: None
+# =============================================================================
+# [BUILD] AWE V6 Titan - PyBind11 Setup
+# O Aperto de Mão C++ / Python
+# =============================================================================
+
+# Forçar compilação altamente otimizada para arquitetura Ada Lovelace (L40S)
+# Compute Capability da L40S é 8.9
+os.environ["TORCH_CUDA_ARCH_LIST"] = "8.9"
 
 setup(
-    name='monster_core',
-    version='1.0.0',
-    description='Zero-Copy C++/CUDA Engine for AAA World-to-Mesh Pipeline',
+    name='socket_engine_cuda',
     ext_modules=[
         CUDAExtension(
-            name='monster_core',
-            sources=['monster_core.cpp', 'monster_core_kernels.cu'],
-            libraries=['gomp'],
+            name='socket_engine_cuda', 
+            sources=['kernels/socket_engine.cu'],
             extra_compile_args={
-                'cxx': ['-O3', '-std=c++20', '-march=native', '-fopenmp'],
-                'nvcc': ['-O3', '--use_fast_math'],
+                'cxx': ['-O3'],
+                'nvcc': [
+                    '-O3', 
+                    '-U__CUDA_NO_HALF_OPERATORS__',
+                    '-U__CUDA_NO_HALF_CONVERSIONS__',
+                    '-U__CUDA_NO_HALF2_OPERATORS__',
+                    '--use_fast_math'
+                ]
             }
-        )
+        ),
     ],
     cmdclass={
-        'build_ext': BuildExtension.with_options(use_ninja=True)
-    }
+        'build_ext': BuildExtension
+    },
+    version='6.0.0',
+    description='V6 Titan Zero-Copy Socket Engine',
 )
