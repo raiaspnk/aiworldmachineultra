@@ -658,5 +658,17 @@ class TitanMaster:
 
 
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="AWE V10 Surgery Engine v4.0")
+    parser.add_argument("--prompt", type=str, required=True, help="O prompt de geração do mundo 3D.")
+    parser.add_argument("--seed", type=int, default=42, help="Semente global de geração.")
+    parser.add_argument("--use-v11-macro", action="store_true", help="Usa a geração V11 Universal Macro/Micro.")
+    
+    args = parser.parse_args()
+    
     maestro = TitanMaster()
-    maestro.execute_world_prompt("Uma zona de quarentena militar com 5 tendas hospitalares e 3 torres de vigia sobre um asfalto rachado.")
+    
+    if args.use_v11_macro:
+        maestro.execute_universal_pipeline(args.prompt)
+    else:
+        maestro.execute_world_prompt(args.prompt, seed=args.seed)
