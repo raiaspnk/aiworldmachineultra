@@ -27,7 +27,7 @@ Pillow>=10.0.0
 # 3D Geometry
 trimesh>=4.0.0
 fast_simplification
-numpy>=1.24.0
+numpy<2.0.0
 
 # Checkpointing & Serialization
 safetensors>=0.4.0
