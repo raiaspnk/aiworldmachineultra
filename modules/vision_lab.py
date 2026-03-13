@@ -64,7 +64,7 @@ class VisionLab:
         if self.flux_model is not None:
             return
             
-        logger.info("[VisionLab] Carregando FLUX.1-dev (12GB VRAM)...")
+        logger.info("[VisionLab] Carregando FLUX.2-dev (12GB VRAM)...")
         
         try:
             from diffusers import FluxPipeline

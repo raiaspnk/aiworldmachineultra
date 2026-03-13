@@ -3,6 +3,13 @@ import time
 import hashlib
 import struct
 import gc
+import pkgutil
+
+# Hack para enganar bibliotecas antigas no Python 3.12
+if not hasattr(pkgutil, 'ImpImporter'):
+    class DummyImpImporter: pass
+    pkgutil.ImpImporter = DummyImpImporter
+
 import numpy as np
 import logging
 import json
