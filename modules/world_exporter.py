@@ -565,14 +565,17 @@ def assemble_titan_world(terrain_data: dict, architect_assets: list,
                 cable_normals.append(offset.tolist())
                 cable_uvs.append([s / sides, u * 10])
 
+        base_index_offset = 0 # Track vertex offset for multiple points
         for i in range(segments):
             for s in range(sides):
-                i0 = i * sides + s
-                i1 = i * sides + (s + 1) % sides
-                i2 = (i + 1) * sides + s
-                i3 = (i + 1) * sides + (s + 1) % sides
-                cable_faces.append([i0, i1, i2])
-                cable_faces.append([i1, i3, i2])
+                i0 = base_index_offset + i * sides + s
+                i1 = base_index_offset + i * sides + (s + 1) % sides
+                i2 = base_index_offset + (i + 1) * sides + s
+                i3 = base_index_offset + (i + 1) * sides + (s + 1) % sides
+                
+                # Winding repair - CCW
+                cable_faces.append([i0, i2, i1])
+                cable_faces.append([i1, i2, i3])
         
         if cable_verts and cable_faces:
             cable_mat = exporter.create_pbr_material(

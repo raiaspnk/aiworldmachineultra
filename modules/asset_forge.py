@@ -257,15 +257,19 @@ class AssetForge:
         """
         logger.warning("[AssetForge] FALLBACK: Gerando cubo procedural (TRELLIS indisponível).")
         
-        # Cubo unitário com 8 vértices e 12 faces (triângulos)
+        # Cubo unitário com 8 vértices e 12 faces (triângulos) - CORRIGIDO WINDING PARA CCW
         vertices = np.array([
             [-0.5, -0.5, -0.5], [ 0.5, -0.5, -0.5], [ 0.5,  0.5, -0.5], [-0.5,  0.5, -0.5],
             [-0.5, -0.5,  0.5], [ 0.5, -0.5,  0.5], [ 0.5,  0.5,  0.5], [-0.5,  0.5,  0.5],
         ], dtype=np.float32)
         
         faces = np.array([
-            [0,1,2], [0,2,3], [4,6,5], [4,7,6], [0,4,5], [0,5,1],
-            [2,6,7], [2,7,3], [0,3,7], [0,7,4], [1,5,6], [1,6,2],
+            [0, 2, 1], [0, 3, 2], # Frente (Z negativo)
+            [1, 2, 6], [1, 6, 5], # Direita (X positivo)
+            [4, 5, 6], [4, 6, 7], # Trás (Z positivo)
+            [0, 4, 7], [0, 7, 3], # Esquerda (X negativo)
+            [3, 7, 6], [3, 6, 2], # Topo (Y positivo)
+            [0, 1, 5], [0, 5, 4]  # Base (Y negativo)
         ], dtype=np.int32)
         
         return {
