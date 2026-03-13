@@ -56,7 +56,7 @@ class TextureUnit:
             from diffusers import StableDiffusionInpaintPipeline
             
             self.flux_inpaint_model = StableDiffusionInpaintPipeline.from_pretrained(
-                "stabilityai/stable-diffusion-2-inpainting",
+                "runwayml/stable-diffusion-inpainting",
                 torch_dtype=torch.float16,
             )
             self.flux_inpaint_model.to(self.device)

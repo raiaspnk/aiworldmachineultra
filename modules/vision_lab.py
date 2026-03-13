@@ -64,7 +64,7 @@ class VisionLab:
         if self.flux_model is not None:
             return
             
-        logger.info("[VisionLab] Carregando FLUX.2-dev (12GB VRAM)...")
+        logger.info("[VisionLab] Carregando FLUX.1-dev (12GB VRAM)...")
         
         try:
             from diffusers import FluxPipeline
@@ -78,13 +78,13 @@ class VisionLab:
             # V8 Enterprise: Ativa otimizações de memória
             self.flux_model.enable_model_cpu_offload()
             
-            logger.info("[VisionLab] FLUX.2-dev carregado com sucesso!")
+            logger.info("[VisionLab] FLUX.1-dev carregado com sucesso!")
             
         except ImportError:
             logger.error("[VisionLab] 'diffusers' não instalado! Rode: pip install diffusers")
             raise
         except Exception as e:
-            logger.error(f"[VisionLab] Falha ao carregar FLUX.2-dev: {e}")
+            logger.error(f"[VisionLab] Falha ao carregar FLUX.1-dev: {e}")
             raise
 
     def _load_sam3(self):
@@ -164,7 +164,7 @@ class VisionLab:
         
         prompt_tecnico = self._inject_blueprint_styles(user_prompt)
         logger.info(f"[VisionLab] Prompt Enriquecido: {prompt_tecnico}")
-        logger.info(f"[VisionLab] Invocando FLUX.2-dev REAL...")
+        logger.info(f"[VisionLab] Invocando FLUX.1-dev REAL...")
         
         # Configuração de resolução
         if resolution == "4k":
