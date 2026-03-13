@@ -166,6 +166,22 @@ class TitanQualityControl:
         return {"passed": passed_all, "details": results, "metric": "PBR Energy Variance"}
 
     # -------------------------------------------------------------------------
+    # [GATE 3.5] TEXTURE ENTROPY AUDIT
+    # -------------------------------------------------------------------------
+    def audit_texture_entropy(self, image_rgb: np.ndarray, threshold: float = 50.0) -> dict:
+        """
+        Calcula a entropia/variância inicial da textura cropada antes do Pipeline.
+        """
+        gray = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2GRAY)
+        laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
+        passed = laplacian_var >= threshold
+        
+        msg = "PASS" if passed else f"FAIL (Textura Lavada) - Score {laplacian_var:.1f}"
+        logger.info(f"[QC] Texture Entropy: Score {laplacian_var:.1f} | Threshold {threshold} | {msg}")
+        
+        return {"passed": passed, "score": float(laplacian_var), "metric": "Texture Entropy"}
+
+    # -------------------------------------------------------------------------
     # [GATE 4] TOPOLOGY AUDIT (MobileNet-V3-Small)
     # -------------------------------------------------------------------------
     def audit_geometry_topology(self, vertices: np.ndarray, faces: np.ndarray) -> dict:
