@@ -78,9 +78,14 @@ class AssetForge:
             if trellis_path not in sys.path:
                 sys.path.insert(0, trellis_path)
                 
-            from trellis2.pipelines import TrellisImageTo3DPipeline
+            # O CAMINHO EXATO: Pasta.Subpasta.Arquivo import Classe
+            from trellis2.pipelines.trellis2_image_to_3d import Trellis2ImageTo3DPipeline
+            # Se você também for usar a texturização real do Trellis:
+            from trellis2.pipelines.trellis2_texturing import Trellis2TexturingPipeline
             
-            self.trellis_pipeline = TrellisImageTo3DPipeline.from_pretrained(
+            logger.info(">>> [V11] TRELLIS 2 CORE CARREGADO: MODO GEOMETRIA REAL ATIVADO <<<")
+            
+            self.trellis_pipeline = Trellis2ImageTo3DPipeline.from_pretrained(
                 "microsoft/TRELLIS-image-large"
             )
             self.trellis_pipeline.to(self.device)
