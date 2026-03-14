@@ -59,22 +59,23 @@ class VisionLab:
     # =========================================================================
     def _load_flux(self):
         if self.flux_model is not None: return
-        logger.info("[VisionLab] Carregando Engine V12 (Armor VRAM)...")
+        logger.info("[VisionLab] Carregando Engine V12 (FLUX.2 Core)...")
         try:
             from diffusers import FluxPipeline
-            # Forçamos o loading da V2 com bypass do erro de processador
+            # Carregamento otimizado para FLUX.2 (Pixtral-based)
             self.flux_model = FluxPipeline.from_pretrained(
                 "black-forest-labs/FLUX.2-dev",
                 torch_dtype=torch.bfloat16,
-                text_encoder_2=None, 
-                tokenizer_2=None
-            )
-            # Fix para o erro de 'model_max_length' do Pixtral/Mistral
-            if not hasattr(self.flux_model.tokenizer, 'model_max_length'):
-                self.flux_model.tokenizer.model_max_length = 512
-                
-            self.flux_model.to(self.device)
-            logger.info("[VisionLab] FLUX.2-dev acoplado e blindado!")
+                use_safetensors=True
+            ).to(self.device)
+            
+            # Fix para o erro de 'model_max_length'
+            if hasattr(self.flux_model, "tokenizer") and self.flux_model.tokenizer:
+                if not hasattr(self.flux_model.tokenizer, 'model_max_length'):
+                    self.flux_model.tokenizer.model_max_length = 512
+            
+            self.flux_model.enable_attention_slicing()
+            logger.info("[VisionLab] FLUX.2-dev acoplado com sucesso!")
         except Exception as e:
             logger.warning(f"[VisionLab] Fallback para V1 devido a: {e}")
             from diffusers import FluxPipeline
@@ -336,22 +337,26 @@ class VisionLab:
         return cv2.undistort(image, self._camera_matrix, self._distortion_coeffs)
 
     # =========================================================================
-    # REESCRITA DO QC (Para evitar o falso positivo da fumaça)
+    # [FIX V12] Auditoria de Nitidez com Modo Atmosférico
     # =========================================================================
     def _perform_sharpness_audit(self, image_rgb: np.ndarray, prompt: str) -> bool:
         import cv2
         gray = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2GRAY)
         score = cv2.Laplacian(gray, cv2.CV_64F).var()
         
-        # FIX V12: Se o usuário quer fumaça/névoa, o threshold cai de 50 para 15.
-        atmospheric_keywords = ["fumaça", "smoke", "cinzas", "ash", "fog", "névoa", "volumetric"]
+        # Se o prompt tiver fumaça/névoa, o threshold cai de 50 para 15 (ajustado para 20 no Fix 12.1)
+        atmospheric_keywords = ["fumaça", "smoke", "cinzas", "ash", "fog", "névoa", "volumetric", "fumo"]
         threshold = 50.0
-        if any(word in prompt.lower() for word in atmospheric_keywords):
-            threshold = 15.0
-            logger.info(f"[QC] Modo Atmosférico Ativado. Threshold reduzido para {threshold}")
+        if any(word.lower() in prompt.lower() for word in atmospheric_keywords):
+            threshold = 20.0
+            logger.info(f"[QC] Modo Atmosférico detectado. Threshold reduzido para {threshold}")
 
         logger.info(f"[QC] Sharpness Audit: Score {score:.1f} | Threshold {threshold}")
-        return score >= threshold
+        
+        if score < threshold:
+            logger.error(f"[QC] FAIL: Imagem muito borrada ({score:.1f} < {threshold}).")
+            return False
+        return True
 
     def calculate_ue5_world_scale(self, S_pixel: float, Z_depth_meters: float) -> float:
         sensor_width_mm = 36.0 
@@ -364,11 +369,21 @@ class VisionLab:
     # ORQUESTRADOR DA FASE 1 (API Principal)
     # =========================================================================
     def generate_intent_map(self, prompt: str) -> dict:
-        logger.info(">>> [V11] Gerando Mapa de Intenção (Blueprint -> Segmentação -> Topologia) <<<")
+        logger.info(">>> [V12] Gerando Mapa de Intenção (Blueprint -> Segmentação -> Topologia) <<<")
         
         blueprint_4k = self.generate_blueprint(prompt)
         blueprint_4k = self._undistort_image(blueprint_4k)
         
+        # AUDITORIA DE QUALIDADE (Agora com correção para fumaça)
+        if not self._perform_sharpness_audit(blueprint_4k, prompt):
+            # Se falhar, a gente tenta um "micro-sharpening" antes de desistir
+            import cv2
+            logger.warning("[VisionLab] Aplicando Re-Sharpening de emergência...")
+            kernel = np.array([[-1,-1,-1], [-1,9,-1], [-1,-1,-1]])
+            blueprint_4k = cv2.filter2D(blueprint_4k, -1, kernel)
+            if not self._perform_sharpness_audit(blueprint_4k, prompt):
+                raise RuntimeError("GATE 0 FALHOU! Blueprint borrado mesmo após correção.")
+
         sam_mask_4k = self.extract_semantic_atlas(blueprint_4k)
         depth_map_4k = self.extract_metric_depth(blueprint_4k)
         
@@ -409,25 +424,11 @@ class VisionLab:
     # VRAM MANAGEMENT
     # =========================================================================
     def unload_all(self):
-        logger.info("[VisionLab] Expurgando tensores e descarregando modelos...")
-        
-        if self.flux_model is not None:
-            del self.flux_model
-            self.flux_model = None
-            
-        if self.sam_model is not None and self.sam_model != "FALLBACK_OPENCV":
-            del self.sam_model
-            del self.sam_generator
-            self.sam_model = None
-            self.sam_generator = None
-            
-        if self.depth_model is not None:
-            del self.depth_model
-            del self.depth_processor
-            self.depth_model = None
-            self.depth_processor = None
-            
-        gc.collect() # <--- OBRIGATÓRIO PARA LIMPAR A VRAM REAL
+        logger.info("[VisionLab] Expurgando VRAM...")
+        if self.flux_model: del self.flux_model
+        if self.sam_model: del self.sam_model
+        if self.depth_model: del self.depth_model
+        gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
