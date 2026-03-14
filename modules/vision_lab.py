@@ -29,6 +29,9 @@ logger = logging.getLogger("VisionLab")
 # 3. Profundidade Métrica (Depth Anything V3)
 # =============================================================================
 
+# Garante que o Python ache o SAM 3 instalado via Git
+sys.path.append(os.path.abspath("sam3"))
+
 # Lazy Imports
 _FLUX_PIPELINE = None
 _SAM3_PREDICTOR = None

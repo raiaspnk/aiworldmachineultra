@@ -589,7 +589,8 @@ class TitanMaster:
             # ================================================================
             self._transition_to(EngineState.TEXTURE)
             
-            entropy_result = self.qc.audit_texture_entropy(blueprint)
+            # [FIX #75] Auditoria de Entropia (Reduzido para 25.0 devido a fumaça/cinzas)
+            entropy_result = self.qc.audit_texture_entropy(blueprint, threshold=25.0)
             if entropy_result["passed"]:
                 logger.info(">> [V10] Texturizando assets via Real-ESRGAN + Sobel PBR...")
                 
