@@ -1,10 +1,9 @@
 import triton
 from triton.runtime.autotuner import Autotuner
 
-# [PATCH V14] Forçamos a compatibilidade universal de argumentos
+# [PATCH V14] Blindagem contra conflito Triton 2.x vs 3.x
 _original_init = Autotuner.__init__
 def _patched_init(self, *args, **kwargs):
-    # Se mandarem argumentos demais (14 ou mais), a gente poda pra 13
     if len(args) > 13:
         args = args[:13]
     return _original_init(self, *args, **kwargs)

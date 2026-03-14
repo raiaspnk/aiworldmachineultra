@@ -89,11 +89,8 @@ class VisionLab:
             raise
 
     def _load_sam3(self):
-        if self.sam_model is not None:
-            return
-            
-        logger.info("[VisionLab] Carregando SAM 3 (3GB VRAM)...")
-        
+        if self.sam_model is not None: return
+        logger.info("[VisionLab] Carregando SAM 3 (Fatiamento de Precisão)...")
         try:
             from sam3.build_sam import build_sam3
             from sam3.automatic_mask_generator import SAM3AutomaticMaskGenerator
