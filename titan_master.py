@@ -442,8 +442,8 @@ class TitanMaster:
                 sam_mask_raw = intent_map["sam_mask"]
                 actors_metadata = intent_map["actors_metadata"]
                 
-                # GATE 0: QC Sharpness
-                sharp_result = self.qc.audit_sharpness(blueprint)
+                # GATE 0: QC Sharpness (FIX #70: Threshold 15.0 para modo atmosférico)
+                sharp_result = self.qc.audit_sharpness(blueprint, threshold=15.0)
                 if not sharp_result["passed"]:
                     logger.error("GATE 0 FALHOU! Blueprint borrado. Abortando.")
                     self.vram_pool.iron_flush()
