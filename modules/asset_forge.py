@@ -1,22 +1,3 @@
-import triton
-from triton.runtime.autotuner import Autotuner
-
-# =============================================================================
-# [PATCH V13] Triton 3.1.0 Compatibility Fix
-# Resolve o erro: Autotuner.__init__() takes from 7 to 13 positional args
-# =============================================================================
-original_init = Autotuner.__init__
-
-def patched_init(self, *args, **kwargs):
-    # Se o código tentar passar 14 argumentos (padrão Triton 2.x), 
-    # a gente remove o último para o Triton 3.x não reclamar.
-    if len(args) == 14:
-        args = args[:-1]
-    return original_init(self, *args, **kwargs)
-
-Autotuner.__init__ = patched_init
-# =============================================================================
-
 import os
 import sys
 import torch
