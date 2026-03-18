@@ -1,125 +1,143 @@
-# ⚡ AI World Engine V11 — Guia de Setup (Lightning.ai Studio)
+# ⚡ AI World Engine — Guia de Setup Dia 1 (Lightning.ai)
 
-O Lightning.ai é perfeito para a V11, com suporte nativo a PyTorch avançado e acesso rápido a GPUs parrudas (A100, L40S, RTX 4090, RTX 6000 Ada). Siga os passos abaixo no terminal do seu **Studio** recém-criado.
-
-## 0. Criar o Studio e Escolher a GPU
-
-1. Acesse o **Lightning.ai**.
-2. Clique em **Start a new Studio**.
-3. Escolha o template em branco (Blank Studio) com **PyTorch habilitado**.
-4. No menu superior direito (Hardware), ligue uma máquina de peso pesado (Recomendado: **L40S, A100 ou RTX 4090/6000 Ada** com pelo menos 24GB+ de VRAM).
-   * *O projeto V11 exige bastante VRAM para aguentar o FLUX e o TRELLIS 2, portanto foque em 24GB ou mais.*
+> **Versão:** V12 | **GPU alvo:** L40S (48 GB VRAM) | **Python:** 3.10+
 
 ---
 
-## 1. Subir o Projeto V11
+## 0. Criar o Studio
 
-Você precisa colocar a pasta do AI World Engine dentro da raiz do Studio (normalmente em `/workspace`).
-Abra o terminal do Studio e clone/descompacte seu repositório:
+1. Acesse **lightning.ai** → **New Studio**
+2. Template: **Blank** com PyTorch habilitado
+3. Hardware: **L40S** (48 GB VRAM) — mínimo A100 ou RTX 4090
+
+---
+
+## 1. Abrir o Terminal e Clonar o Projeto
 
 ```bash
 cd /workspace
-# Clonando o repositório V11:
+
 git clone https://github.com/raiaspnk/aiworldmachineultra.git
 cd aiworldmachineultra
-
-# Ou, arraste a pasta local do seu Windows
-# para dentro da interface web do Lightning Studio.
 ```
 
 ---
 
-## 2. Preparar o Ambiente Virtual Python
-
-O Lightning Studio já vem com Python e PyTorch, mas é melhor criar um ambiente isolado para evitar conflitos:
+## 2. Instalar Dependências do Sistema
 
 ```bash
-# Atualize o apt e instale essenciais de build (importante para compilar o C++)
-sudo apt-get update
-sudo apt-get install -y build-essential curl ninja-build ffmpeg libsm6 libxext6 libgl1 
-
-# Instalar o xformers e PyTorch 2.4.0+ (caso o Studio esteja desatualizado)
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+sudo apt-get update -q
+sudo apt-get install -y build-essential ninja-build ffmpeg libsm6 libxext6 libgl1
 ```
 
 ---
 
-## 3. Instalação das Dependências I.A. (Requirements)
-
-Instale os pacotes core de IA e processamento de imagem/geometria:
+## 3. PyTorch + CUDA (se o Studio estiver desatualizado)
 
 ```bash
-# O projeto possui um arquivo de requirements dedicado para GPU:
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+
+# Verificação — deve imprimir True
+python -c "import torch; print(torch.cuda.is_available())"
+```
+
+---
+
+## 4. Dependências Python
+
+```bash
 pip install -r requirements_gpu.txt
-
-# (Apenas caso algum pacote não esteja no arquivo, instale manualmente:)
-# pip install segment_anything_hq depth_anything_v2 supervision trimesh fast-simplification
 ```
-
-> [!TIP]
-> **Autenticação no HuggingFace:** O FLUX.2-dev e o TRELLIS 2 exigem token de acesso.
-> Execute o comando: `huggingface-cli login`
-> E cole o seu token público do HuggingFace.
 
 ---
 
-## 4. Instalar o TRELLIS 2 (AssetForge)
-
-O AssetForge depende intensamente do algoritmo TRELLIS da Microsoft para gerar geometrias a partir do POVs:
+## 5. Autenticar no HuggingFace (obrigatório para FLUX)
 
 ```bash
-# Acesse a engine
-cd /workspace/aiworldmachineultra
+# Opção A — interativo
+huggingface-cli login
 
-# Baixando e instalando o pacote Trellis oficial:
-git clone --recurse-submodules https://github.com/microsoft/TRELLIS.git
-cd TRELLIS
-pip install -e .
-cd ..
+# Opção B — variável de ambiente (mais rápido)
+export HF_TOKEN=hf_SEU_TOKEN_AQUI
 ```
 
-*Nota: Durante o boot, a V11 (`titan_master.py`) vai baixar automaticamente os modelos pesados para o seu cache (na pasta `~/.cache/huggingface/`).*
+> Pegue seu token em: https://huggingface.co/settings/tokens
 
 ---
 
-## 5. Compilar os Kernels C++ Custom (Opcional, mas recomendado)
-
-O projeto V10/V11 possui scripts C++ com instruções PTX customizadas (`socket_engine.cu`) para simulação de Física (catenária) agressivas sem estressar a GPU.
-
-**Como compilar o PyBind11 no Lightning:**
-```bash
-cd /workspace/aiworldmachineultra/kernels
-
-# Instalando dependência pra linkar o Python com C/CUDA
-pip install pybind11
-
-# Você pode usar um simples compilar do NVCC se já tiver criado um setup.py (se você tiver ele)
-# nvidia-smi para confirmar a versão do CUDA (deve ser > 11.8)
-nvcc -O3 -shared -Xcompiler -fPIC -I $(python3 -m pybind11 --includes) socket_engine.cu -o socket_engine_cuda.so
-
-cd ..
-```
-
----
-
-## 6. Ligar o Orquestrador! (Rodar a V11)
-
-Está tudo pronto! Agora vamos testar a Fase Macro gerando o Master Plan e esculpindo as cidades:
-
-Você pode inicializar via terminal ou criar um script de boot:
+## 6. Instalar SAM 3
 
 ```bash
-python titan_master.py --prompt "Cidade cyberpunk japonesa neon e destruida, clima noturno, chuva, cyberware, ruas estreitas" --seed 42 --use-v11-macro
-```
+pip install git+https://github.com/facebookresearch/sam3.git
 
-> [!IMPORTANT]
-> O código fará um **cold start** de alguns minutos enquanto baixa 15GB+ de modelos (FLUX, SAM3, TRELLIS2, Real-ESRGAN). 
-> Nas próximas rodadas o `_warmup_models()` já entrará em ação com Cache Hit e pulará essa parte.
+# Verifica
+python -c "import sam3; print('SAM 3 OK')"
+```
 
 ---
 
-## Dicas Finais do Lightning.ai
+## 7. Instalar Trellis 2
 
-1. **Persistência de Arquivos:** Tudo dentro de `/workspace/` no Lightning fica salvo se a máquina for desligada. Não crie arquivos pesados fora disso!
-2. **Monitoramento:** Enquanto o `titan_master.py` rodar, abra outra aba e digite `watch -n 1 nvidia-smi` para monitorar alegremente a RAM e GPU fritando em 400w puxando as texturas.
-3. **Download Rápido:** Após exportar o glorioso Mundo em `.glb` no `output/world_output.glb`, use a interface Web do Lightning para abaixá-lo usando o botão direito no painel lateral de arquivos -> "Download". (Se for muito grande, o `exportador multipart OOM` do Batch 8 já ajudará!)
+```bash
+git clone --depth=1 https://github.com/microsoft/TRELLIS.git trellis2
+cd trellis2 && pip install -e . && cd ..
+
+# Verifica
+python -c "from trellis2.pipelines.trellis2_image_to_3d import Trellis2ImageTo3DPipeline; print('Trellis 2 OK')"
+```
+
+---
+
+## 8. Rodar o Diagnóstico Modular (A Ordem Importa!)
+
+> ⚠️ **Não rode o `titan_master.py` antes de todos os testes passarem.**
+
+```bash
+# Testa cada módulo isolado — para na primeira falha
+bash tests/run_all.sh
+```
+
+O script vai rodar em sequência:
+
+| Script | O que valida | Arquivo gerado |
+|---|---|---|
+| `test_env.py` | CUDA, PyTorch, todas as libs | — |
+| `test_flux.py` | FLUX.1-dev gera imagem | `tests/output_flux.png` |
+| `test_sam3.py` | SAM 3 fatia a imagem | — |
+| `test_trellis.py` | **Trellis gera o GLB** | `tests/output_trellis.glb` ⭐ |
+| `test_depth.py` | Depth Anything funciona | `tests/output_depth.png` |
+
+---
+
+## 9. Resultado Esperado
+
+```
+✅ ETAPA 0: Ambiente OK
+✅ ETAPA 1: FLUX OK → tests/output_flux.png
+✅ ETAPA 2: SAM 3 OK → X máscaras geradas
+✅ ETAPA 3: TRELLIS OK → tests/output_trellis.glb  ← PRIMEIRO GLB REAL!
+✅ ETAPA 4: DEPTH OK → tests/output_depth.png
+```
+
+Abra o `output_trellis.glb` no [gltf-viewer.donmccurdy.com](https://gltf-viewer.donmccurdy.com/) para visualizar.
+
+---
+
+## 10. Só Então: Rodar a Pipeline Completa
+
+```bash
+python titan_master.py \
+  --prompt "Um posto avançado da corporação Weyland-Yutani em um vale vulcânico, hangares industriais, luzes vermelhas, fumaça volumétrica, realismo cinematográfico AAA" \
+  --seed 777
+```
+
+---
+
+## Dicas Lightning.ai
+
+| Dica | Detalhe |
+|---|---|
+| **Persistência** | Salve tudo dentro de `/workspace/` |
+| **Monitor de GPU** | `watch -n 1 nvidia-smi` em outra aba |
+| **Download do GLB** | Painel lateral de arquivos → botão direito → Download |
+| **VRAM pós-teste** | Cada `test_*.py` libera a VRAM antes de sair |
