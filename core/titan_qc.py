@@ -197,28 +197,29 @@ class TitanQualityControl:
         # Renderiza normal map de 3 ângulos ortogonais e vota
         
         # Calcula métricas geométricas como proxy do MobileNet
-        # 1. Non-manifold edges check
-        edge_count = {}
-        for face in faces:
-            for i in range(3):
-                e = tuple(sorted((int(face[i]), int(face[(i+1) % 3]))))
-                edge_count[e] = edge_count.get(e, 0) + 1
+        # 1. Non-manifold edges check (Vectorized NumPy - Ultra Fast)
+        edges = np.vstack([
+            faces[:, [0, 1]],
+            faces[:, [1, 2]],
+            faces[:, [2, 0]]
+        ])
+        edges.sort(axis=1) # (A, B) == (B, A)
+        _, counts = np.unique(edges, axis=0, return_counts=True)
         
-        non_manifold = sum(1 for c in edge_count.values() if c > 2)
-        total_edges = len(edge_count)
-        non_manifold_ratio = non_manifold / max(total_edges, 1)
+        non_manifold = int(np.sum(counts > 2))
+        total_edges = len(counts)
+        non_manifold_ratio = float(non_manifold / max(total_edges, 1))
         
-        # 2. Degenerate face check
-        degenerate_faces = 0
-        for face in faces:
-            v0 = vertices[face[0]]
-            v1 = vertices[face[1]]
-            v2 = vertices[face[2]]
-            area = 0.5 * np.linalg.norm(np.cross(v1 - v0, v2 - v0))
-            if area < 1e-8:
-                degenerate_faces += 1
+        # 2. Degenerate face check (Vectorized NumPy - Ultra Fast)
+        v0 = vertices[faces[:, 0]]
+        v1 = vertices[faces[:, 1]]
+        v2 = vertices[faces[:, 2]]
         
-        degenerate_ratio = degenerate_faces / max(len(faces), 1)
+        cross_prod = np.cross(v1 - v0, v2 - v0)
+        areas = 0.5 * np.linalg.norm(cross_prod, axis=1)
+        
+        degenerate_faces = int(np.sum(areas < 1e-8))
+        degenerate_ratio = float(degenerate_faces / max(len(faces), 1))
         
         # FIX #12: Scoring com confidence threshold
         confidence = 1.0 - (non_manifold_ratio * 5.0) - (degenerate_ratio * 10.0)
