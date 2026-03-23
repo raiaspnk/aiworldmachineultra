@@ -5,6 +5,10 @@ echo "=========================================================="
 echo "    AI WORLD ENGINE - DAY 1 LIGHTNING SETUP SCRIPT        "
 echo "=========================================================="
 
+# FUNDAMENTAL PARA A LIGHTNING: Salvar os pesos gigas na pasta que NÃO apaga no restart
+export HF_HOME="/workspace/.cache/huggingface"
+echo "📦 HF_HOME = $HF_HOME (Para evitar re-download de 40GB do FLUX.2 toda vez)"
+
 echo "[1/6] Atualizando pacotes OS (libgl1 para OpenCV GUI/Real-ESRGAN)..."
 sudo apt-get update && sudo apt-get install -y libgl1-mesa-glx libglib2.0-0 git build-essential ninja-build || echo "⚠️ Aviso: apt-get falhou (talvez nao seja root), continuando..."
 
