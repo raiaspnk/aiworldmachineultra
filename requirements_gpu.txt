@@ -33,6 +33,7 @@ Pillow>=10.0.0
 # 3D Geometry
 trimesh>=4.0.0
 fast_simplification
+xatlas
 numpy<2.0.0
 
 # Checkpointing & Serialization

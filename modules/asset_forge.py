@@ -437,6 +437,30 @@ class AssetForge:
         
         return verts_fixed, faces
 
+    # =========================================================================
+    # [BATCH 16] V12 UV UNWRAPPING (O DESCASCADOR)
+    # =========================================================================
+    def generate_uv_mapping(self, vertices: np.ndarray, faces: np.ndarray) -> tuple:
+        """
+        V12 UV Unwrapping: Descasca a malha 3D fechada em coordenadas 2D sem sobreposicao.
+        Vital para o TextureUnit (Real-ESRGAN PBR) poder pintar texturas fisicas no modelo.
+        """
+        try:
+            import xatlas
+            logger.info("[AssetForge] [V12] Iniciando XAtlas UV Unwrapping...")
+            
+            # O XAtlas gera novas costuras (seams), entao a topologia muda levemente.
+            vmapping, new_faces, new_uvs = xatlas.parametrize(vertices, faces)
+            
+            unwrapped_vertices = vertices[vmapping]
+            
+            logger.info(f"[AssetForge] UV Unwrap Sucesso! {len(vertices)} originais -> {len(unwrapped_vertices)} vertices com costura (UV).")
+            return unwrapped_vertices, new_faces, new_uvs
+            
+        except ImportError:
+            logger.warning("[AssetForge] xatlas nao encontrado! Fallback projetando tudo em [0,0] (Texturas vao quebrar!).")
+            return vertices, faces, np.zeros((len(vertices), 2), dtype=np.float32)
+
     def prepare_backside_inpaint(self, raw_vertices: np.ndarray) -> np.ndarray:
         """
         Renderiza uma projeção ortográfica traseira do modelo.
@@ -495,15 +519,19 @@ class AssetForge:
         # 3. QEM Decimation (V8 Enterprise + V11 Multi-Tier LOD)
         decimated_verts, decimated_faces = self.trigger_cpp_decimation(raw_vertices, raw_faces, lod_level)
         
-        # 4. Prepara mapa traseiro para inpainting
-        backside_uv = self.prepare_backside_inpaint(decimated_verts)
+        # [BATCH 16] 3.5 UV Unwrapping! (Preparando a Lona 2D para o Real-ESRGAN)
+        final_verts, final_faces, uvs = self.generate_uv_mapping(decimated_verts, decimated_faces)
         
-        logger.info(f"[AssetForge] Ator {actor_id} REAL finalizado: {len(decimated_faces)} faces, "
+        # 4. Prepara mapa traseiro para inpainting
+        backside_uv = self.prepare_backside_inpaint(final_verts)
+        
+        logger.info(f"[AssetForge] Ator {actor_id} REAL finalizado: {len(final_faces)} faces, "
                      f"PBR: {list(native_pbr.keys())}")
         
         return {
-            "vertices_buffer": decimated_verts,
-            "faces_buffer": decimated_faces,
+            "vertices_buffer": final_verts,
+            "faces_buffer": final_faces,
+            "uvs_buffer": uvs,
             "backside_uv_map": backside_uv,
             "native_pbr_maps": native_pbr,
             "arbitrary_topology": True,
