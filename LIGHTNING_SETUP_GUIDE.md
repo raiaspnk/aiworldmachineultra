@@ -23,68 +23,19 @@ cd aiworldmachineultra
 
 ---
 
-## 2. Instalar Dependências do Sistema
+## 2. Instalação Completa (A Usina)
+
+Nós consolidamos todas as instalações (sistema, ninja, pacotes OS, dependências PyTorch, Diffusers/Transformers @main, SAM 3, Trellis) em um único script blindado contra conflitos da GPU L40S.
 
 ```bash
-sudo apt-get update -q
-sudo apt-get install -y build-essential ninja-build ffmpeg libsm6 libxext6 libgl1
-```
-
----
-
-## 3. PyTorch + CUDA (se o Studio estiver desatualizado)
-
-```bash
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-
-# Verificação — deve imprimir True
-python -c "import torch; print(torch.cuda.is_available())"
-```
-
----
-
-## 4. Dependências Python
-
-```bash
-pip install -r requirements_gpu.txt
-```
-
----
-
-## 5. Autenticar no HuggingFace (obrigatório para FLUX)
-
-```bash
-# Opção A — interativo
-huggingface-cli login
-
-# Opção B — variável de ambiente (mais rápido)
 export HF_TOKEN=hf_SEU_TOKEN_AQUI
+bash setup_day1.sh
 ```
 
-> Pegue seu token em: https://huggingface.co/settings/tokens
-
----
-
-## 6. Instalar SAM 3
-
-```bash
-pip install git+https://github.com/facebookresearch/sam3.git
-
-# Verifica
-python -c "import sam3; print('SAM 3 OK')"
-```
-
----
-
-## 7. Instalar Trellis 2
-
-```bash
-git clone --depth=1 https://github.com/microsoft/TRELLIS.git trellis2
-cd trellis2 && pip install -e . && cd ..
-
-# Verifica
-python -c "from trellis2.pipelines.trellis2_image_to_3d import Trellis2ImageTo3DPipeline; print('Trellis 2 OK')"
-```
+> **Por que usar o script e não na mão?** O `setup_day1.sh` garante a ordem cirúrgica:
+> 1. Instala o `ninja-build` para compilar os kernels do Trellis 2x mais rápido.
+> 2. Puxa os diffusers e transformers novos (FLUX 2).
+> 3. Instala o `triton` **depois** do PyTorch, garantindo que o SAM 3 conecte direto com os binários do CUDA e não faça fallback de memória da L40S para CPU.
 
 ---
 
