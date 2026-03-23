@@ -483,24 +483,10 @@ class TitanMaster:
             self._cuda_sync("VisionLab.unload")  # FIX #28
 
             # ================================================================
-            # FASE 1.5: C++ KERNEL - Socketing do Terreno
+            # FASE 1.5: C++ KERNEL - Socketing do Terreno (Mocks Removidos)
             # ================================================================
-            logger.info(">> Invocando SocketEngine (C++/CUDA). Transferência Zero-Copy.")
-            if HAS_NATIVE_KERNEL and not vision_state:
-                t_pos   = torch.randn((1000000, 3), dtype=torch.float32, device="cuda")
-                t_norm  = torch.ones((1000000, 3), dtype=torch.float32, device="cuda")
-                t_uv    = torch.rand((1000000, 2), dtype=torch.float32, device="cuda")
-                t_ids   = torch.full((1000000, 1), -1, dtype=torch.int32, device="cuda")
-                t_depth = torch.from_numpy(depth).float().to("cuda") if not isinstance(depth, torch.Tensor) else depth
-                t_mask  = torch.full((depth.shape[0], depth.shape[1]), -1, dtype=torch.int32, device="cuda")
-                t_dist  = torch.ones((depth.shape[0], depth.shape[1]), dtype=torch.float32, device="cuda") * 100
-                socket_engine_cuda.forward(t_pos, t_norm, t_uv, t_ids, t_depth, t_mask, t_dist, 1.0)
-                del t_pos, t_norm, t_uv, t_ids, t_depth, t_mask, t_dist
-                self._cuda_sync("SocketEngine")  # FIX #28
-            else:
-                time.sleep(0.5)
-            logger.info(">> Socketing Finalizado. Geometria Nivelada!")
-            self.vram_pool.iron_flush()
+            # O Ground Socketing real agora acontece na Fase 3A (Forge) 
+            # de forma per-ator para não desperdiçar VRAM com mocks gigantes.
 
             # ================================================================
             # FASE 2: S(Classify)
@@ -557,11 +543,36 @@ class TitanMaster:
                         forge_result = self.asset_forge.forge_actor_asset(
                             blueprint, sam_mask_raw, actor_id, lod_level=lod_level
                         )
+                        
+                        # [BATCH 15] Ground Socketing REAL Integration
+                        # Envia os vertices reais do TRELLIS direto pro C++ Kernel amassar no terreno
+                        if HAS_NATIVE_KERNEL:
+                            logger.info(f">> [C++ KERNEL] Aplicando Ground Socketing no Ator {actor_id}...")
+                            verts = forge_result["vertices_buffer"]
+                            if len(verts) > 0:
+                                t_pos = torch.from_numpy(verts).float().to("cuda")
+                                t_norm = torch.ones_like(t_pos)  # Dummies per-vertex pra suportar struct C++
+                                t_uv = torch.zeros((len(verts), 2), dtype=torch.float32, device="cuda")
+                                t_ids = torch.full((len(verts), 1), int(actor_id), dtype=torch.int32, device="cuda")
+                                
+                                # Lida com diferencas NumPy vs Torch
+                                t_depth = torch.from_numpy(depth).float().to("cuda") if not isinstance(depth, torch.Tensor) else depth.clone().detach().float().to("cuda")
+                                t_mask = torch.from_numpy(sam_mask_raw).int().to("cuda") if not isinstance(sam_mask_raw, torch.Tensor) else sam_mask_raw.clone().detach().int().to("cuda")
+                                t_dist = torch.ones_like(t_depth) * 100
+                                
+                                # Modifica vertices in-place na GPU a ~400 GB/s
+                                socket_engine_cuda.forward(t_pos, t_norm, t_uv, t_ids, t_depth, t_mask, t_dist, 1.0)
+                                self._cuda_sync(f"SocketEngine.actor_{actor_id}")
+                                
+                                # Devolve os vertices amassados pro Numpy Dict
+                                forge_result["vertices_buffer"] = t_pos.cpu().numpy()
+                                del t_pos, t_norm, t_uv, t_ids, t_depth, t_mask, t_dist
+                        
                         forge_result["actor_id"] = actor_id
                         forge_result["lod_level"] = lod_level
                         organic_assets_data.append(forge_result)
                         self._cuda_sync(f"Forge.actor_{actor_id}")  # FIX #28
-                        logger.info(f">> [FORGE V10] Ator {actor_id}: {len(forge_result['faces_buffer'])} faces")
+                        logger.info(f">> [FORGE V10] Ator {actor_id}: {len(forge_result['faces_buffer'])} faces (Socketed)")
                     else:
                         logger.warning(f">> [FORGE] Ator {actor_id} REJEITADO pelo Iron Gate!")
                 
