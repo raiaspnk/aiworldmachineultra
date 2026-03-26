@@ -147,43 +147,45 @@ class VisionLab:
             raise
 
     # =========================================================================
-    # 1. FLUX (O Blueprint)
+    # 1. FLUX (O Blueprint) - FIX V13: Native 2048x2048 + Lanczos
     # =========================================================================
     def generate_blueprint(self, user_prompt: str, resolution: str = "4k") -> np.ndarray:
         self._load_flux()
         
-        prompt_tecnico = self._inject_blueprint_styles(user_prompt)
+        # FIX V13: Prompt de condicionamento arquitetonico (Pesado)
+        prompt_tecnico = (
+            f"{user_prompt}, extreme detailed aerial photorealistic top-down view, "
+            "clear street grid, distinct building blocks, visible rooftops, windows, "
+            "destroyed manhattan style, blade runner atmosphere, sharp details, 8k"
+        )
         logger.info(f"[VisionLab] Prompt Enriquecido: {prompt_tecnico}")
         
-        if resolution == "4k":
-            width, height = 1024, 1024
-        else:
-            width, height = 768, 768
-        
-        prompt_tecnico = self._split_long_prompt(prompt_tecnico)
+        # FIX V13: O FLUX.2 aguenta resolucao nativa muito maior. 
+        # Aumentar para 2048 evita a perda brutal de definicao urbana.
+        width, height = 2048, 2048
         
         with torch.inference_mode():
             result = self.flux_model(
                 prompt=prompt_tecnico,
                 height=height,
                 width=width,
-                num_inference_steps=30,
-                guidance_scale=3.5,
+                num_inference_steps=28,
+                guidance_scale=3.0,
                 max_sequence_length=512,
             )
         
-        generated_image = result.images[0]
-        blueprint_rgb = np.array(generated_image, dtype=np.uint8)
+        img = np.array(result.images[0])
+        logger.info(f"[VisionLab] Blueprint Nativo Gerado: {img.shape}")
         
-        logger.info(f"[VisionLab] Blueprint REAL gerado: {blueprint_rgb.shape}")
-        
-        if resolution == "4k" and blueprint_rgb.shape[0] < 2160:
+        # FIX V13: Upscale bicubico borra a rua. LANCZOS mantem a clareza da quadra.
+        if resolution == "4k" and img.shape[0] < 3840:
             from PIL import Image as PILImage
-            pil_img = PILImage.fromarray(blueprint_rgb)
-            pil_img = pil_img.resize((3840, 2160), PILImage.BICUBIC)
-            blueprint_rgb = np.array(pil_img, dtype=np.uint8)
+            pil_img = PILImage.fromarray(img)
+            pil_img = pil_img.resize((3840, 3840), PILImage.LANCZOS)
+            img = np.array(pil_img, dtype=np.uint8)
+            logger.info(f"[VisionLab] Blueprint 4K Lanczos: {img.shape}")
         
-        return blueprint_rgb
+        return img
 
     # =========================================================================
     # 2. SAM 3 (O Retalhador)
@@ -258,7 +260,9 @@ class VisionLab:
         depth_min = depth_map.min()
         depth_max = depth_map.max()
         if depth_max - depth_min > 0:
-            depth_map = ((depth_map - depth_min) / (depth_max - depth_min)) * 50.0
+            # FIX V13: Nao escalar em * 50 arbitrario. Manter relativo nativo [0, 1].
+            # Deixar a matematica focal da classe calcular os metros exatos.
+            depth_map = (depth_map - depth_min) / (depth_max - depth_min)
         
         depth_map = depth_map.astype(np.float32)
         depth_map = self._fix_specular_depth_holes(image_rgb, depth_map)
@@ -400,6 +404,13 @@ class VisionLab:
             cmin, cmax = np.where(cols)[0][[0, -1]]
             
             z_medio = float(np.mean(depth_map_4k[actor_mask]))
+            
+            # FIX V13: Filtra mascaras do SAM usando o Depth Relativo
+            # No DA3, valores proximos a 0.0 e 0.1 quase sempre sacam o cu ou o asfalto bruto.
+            if z_medio < 0.05:
+                logger.info(f"[VisionLab] Ignorando Ator {actor_id}: Detectado como Chao/Ceu (Z={z_medio:.3f})")
+                continue
+                
             scale_ue5 = self.calculate_ue5_world_scale(float(cmax - cmin), z_medio)
             
             actors_metadata[int(actor_id)] = {
