@@ -152,11 +152,10 @@ class VisionLab:
     def generate_blueprint(self, user_prompt: str, resolution: str = "4k") -> np.ndarray:
         self._load_flux()
         
-        # FIX V13: Prompt de condicionamento arquitetonico (Pesado)
+        # FIX V13.1: Condicionamento aereo universal (sem forcar Manhattan/Blade Runner)
         prompt_tecnico = (
-            f"{user_prompt}, extreme detailed aerial photorealistic top-down view, "
-            "clear street grid, distinct building blocks, visible rooftops, windows, "
-            "destroyed manhattan style, blade runner atmosphere, sharp details, 8k"
+            f"{user_prompt}, extreme detailed aerial photorealistic top-down photography, "
+            "clear spatial layout, distinct volumetric structures, sharp edges, 8k"
         )
         logger.info(f"[VisionLab] Prompt Enriquecido: {prompt_tecnico}")
         
