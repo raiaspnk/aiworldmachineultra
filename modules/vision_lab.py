@@ -152,10 +152,10 @@ class VisionLab:
     def generate_blueprint(self, user_prompt: str, resolution: str = "4k") -> np.ndarray:
         self._load_flux()
         
-        # FIX V13.1: Condicionamento aereo universal (sem forcar Manhattan/Blade Runner)
+        # FIX V14: Condicionamento aereo universal ESTRUTURAL
         prompt_tecnico = (
-            f"{user_prompt}, extreme detailed aerial photorealistic top-down photography, "
-            "clear spatial layout, distinct volumetric structures, sharp edges, 8k"
+            f"{user_prompt}, strict orthogonal top-down architectural map, "
+            "perfect building footprints, clear street grid, sharp edges, high contrast volumetric geometry, 8k resolution"
         )
         logger.info(f"[VisionLab] Prompt Enriquecido: {prompt_tecnico}")
         
@@ -187,6 +187,27 @@ class VisionLab:
         return img
 
     # =========================================================================
+    # [FIX V14] LENTE DE AUMENTO (Pre-SAM Unsharp/CLAHE)
+    # =========================================================================
+    def _enhance_blueprint_for_sam(self, image_rgb: np.ndarray) -> np.ndarray:
+        import cv2
+        logger.info("[VisionLab] (V14) Pré-processamento SAM: Aplicando CLAHE e Unsharp Masking...")
+        
+        # 1. CLAHE (Equalização de Histograma) para separar melhor as delimitações
+        lab = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2LAB)
+        l_channel, a, b = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+        cl = clahe.apply(l_channel)
+        limg = cv2.merge((cl,a,b))
+        enhanced = cv2.cvtColor(limg, cv2.COLOR_LAB2RGB)
+        
+        # 2. Unsharp Masking agressivo para cravar bordas
+        gaussian = cv2.GaussianBlur(enhanced, (9,9), 10.0)
+        sharpened = cv2.addWeighted(enhanced, 1.5, gaussian, -0.5, 0, enhanced)
+        
+        return sharpened
+
+    # =========================================================================
     # 2. SAM 3 (O Retalhador)
     # =========================================================================
     def extract_semantic_atlas(self, image_rgb: np.ndarray) -> np.ndarray:
@@ -195,10 +216,13 @@ class VisionLab:
         logger.info("[VisionLab] Ativando fatiamento semântico...")
         height, width = image_rgb.shape[:2]
         
-        if self.sam_model == "FALLBACK_OPENCV":
-            return self._sam_fallback_opencv(image_rgb)
+        # FIX V14: Tratamento de imagem pesado antes da faca entrar
+        enhanced_img = self._enhance_blueprint_for_sam(image_rgb)
         
-        masks_output = self.sam_generator.generate(image_rgb)
+        if self.sam_model == "FALLBACK_OPENCV":
+            return self._sam_fallback_opencv(enhanced_img)
+        
+        masks_output = self.sam_generator.generate(enhanced_img)
         masks_output = sorted(masks_output, key=lambda x: x['area'], reverse=True)
         
         semantic_map = np.full((height, width), -1, dtype=np.int32)
@@ -272,23 +296,6 @@ class VisionLab:
     # =========================================================================
     # HELPERS DE CALIBRAÇÃO E FIXES
     # =========================================================================
-    def _inject_blueprint_styles(self, prompt: str) -> str:
-        technical_style = (
-            "highly detailed urban scene, photorealistic aerial photograph, "
-            "top-down drone view, sharp edges, clear object boundaries, "
-            "high contrast, professional photography, 8k resolution, "
-            "distinct buildings and structures, clear separation between objects"
-        )
-        return f"{prompt}, {technical_style}"
-    
-    def _split_long_prompt(self, prompt: str) -> str:
-        words = prompt.split()
-        if len(words) <= 70:
-            return prompt
-        core = " ".join(words[:60])
-        details = " ".join(words[60:70])
-        return f"{core}, {details}"
-    
     def _fix_specular_depth_holes(self, image_rgb: np.ndarray, depth_map: np.ndarray) -> np.ndarray:
         import cv2
         gray = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
@@ -361,12 +368,23 @@ class VisionLab:
             return False
         return True
 
-    def calculate_ue5_world_scale(self, S_pixel: float, Z_depth_meters: float) -> float:
-        sensor_width_mm = 36.0 
-        image_width_pixels = 3840.0
-        pixel_pitch = sensor_width_mm / image_width_pixels
-        tamanho_focal_plano = S_pixel * pixel_pitch
-        return tamanho_focal_plano * (Z_depth_meters / (self.f_mm / 1000.0))
+    def calculate_ue5_world_scale(self, bounding_width_pixels: float, z_depth_normalized: float) -> float:
+        """
+        V14: Fim da gambiarra trigonométrica. Escala baseada em pegada real no chao
+        e multiplicador puro de altura do depth relativo, garantindo proporção física.
+        """
+        MAX_BUILDING_HEIGHT_METERS = 120.0
+        MAP_WIDTH_METERS = 800.0  # O bairro total tem ~800m
+        
+        # Altura = z-index (0.0 até 1.0) * Teto maximo projetado
+        height_meters = z_depth_normalized * MAX_BUILDING_HEIGHT_METERS
+        
+        # Footprint width = quantos% da tela o prédio ocupa * largura do mapa
+        footprint_meters = (bounding_width_pixels / 3840.0) * MAP_WIDTH_METERS
+        
+        # A escala em metros para Unreal (usada no AssetForge) é a média harmônica entre Z (altura) e XY (largura).
+        final_scale = (height_meters * 0.7) + (footprint_meters * 0.3)
+        return float(final_scale)
 
     # =========================================================================
     # ORQUESTRADOR DA FASE 1 (API Principal)
